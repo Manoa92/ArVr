@@ -2,6 +2,24 @@
   <div id="ar-container" ref="container"></div>
   <button @click="startAR" v-if="!isARStarted">Démarrer AR</button>
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
+
+  <div v-if="isInputVisible" class="tag-input-overlay">
+    <div class="tag-input-box">
+      <label>
+        Nom du tag
+        <input
+          v-model="tagText"
+          @keydown.enter.prevent="confirmTagText"
+          placeholder="Entrez le texte..."
+          autofocus
+        />
+      </label>
+      <div class="tag-input-actions">
+        <button @click="confirmTagText">Valider</button>
+        <button @click="cancelTagText">Annuler</button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -11,6 +29,8 @@ import * as THREE from 'three'
 const container = ref<HTMLDivElement>()
 const isARStarted = ref(false)
 const isARSupported = ref<boolean | null>(null)
+const isInputVisible = ref(false)
+const tagText = ref('')
 
 let scene: THREE.Scene
 let camera: THREE.Camera
@@ -20,6 +40,7 @@ let reticle: THREE.Mesh
 let hitTestSource: any = null
 let localReferenceSpace: any = null
 let tags: THREE.Object3D[] = []
+let pendingTagMatrix = new THREE.Matrix4()
 
 onMounted(() => {
   checkARSupport()
@@ -119,16 +140,32 @@ const createTextSprite = (text: string) => {
 }
 
 const onSelect = () => {
-  if (reticle.visible) {
-    const text = window.prompt('Entrez le texte du tag :', '🎯')
-    if (!text) return
+  if (!reticle.visible) return
+  pendingTagMatrix.copy(reticle.matrix)
+  tagText.value = ''
+  isInputVisible.value = true
+}
 
-    // Créer un tag texte à la position du reticle
-    const tag = createTextSprite(text)
-    tag.position.setFromMatrixPosition(reticle.matrix)
-    scene.add(tag)
-    tags.push(tag)
+const confirmTagText = () => {
+  const text = tagText.value.trim()
+  if (!text) {
+    cancelTagText()
+    return
   }
+
+  // Créer un tag texte à la position mémorisée
+  const tag = createTextSprite(text)
+  tag.position.setFromMatrixPosition(pendingTagMatrix)
+  scene.add(tag)
+  tags.push(tag)
+
+  isInputVisible.value = false
+  tagText.value = ''
+}
+
+const cancelTagText = () => {
+  isInputVisible.value = false
+  tagText.value = ''
 }
 
 const render = (_timestamp: number, frame: any) => {
@@ -164,5 +201,58 @@ button {
   top: 20px;
   left: 20px;
   z-index: 1000;
+}
+
+.tag-input-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 2000;
+}
+
+.tag-input-box {
+  background: rgba(255, 255, 255, 0.95);
+  padding: 16px;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  width: min(320px, 90vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tag-input-box input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  outline: none;
+  font-size: 16px;
+}
+
+.tag-input-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.tag-input-actions button {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tag-input-actions button:first-of-type {
+  background: #1d4ed8;
+  color: white;
+}
+
+.tag-input-actions button:last-of-type {
+  background: rgba(0, 0, 0, 0.12);
 }
 </style>
