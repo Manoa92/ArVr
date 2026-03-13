@@ -5,8 +5,9 @@ Cette application utilise Vue.js, Three.js et WebXR pour créer une expérience 
 ## Fonctionnalités
 
 - Ouvrir la caméra AR de l'appareil
-- Placer des tags (sphères rouges) en cliquant sur l'écran
+- Placer des tags personnalisés en cliquant sur l'écran (avec nom saisi)
 - Les tags restent à leur position dans le monde réel, même si vous bougez
+- Tags avec texte sur fond semi-transparent, toujours orientés vers la caméra
 - Utilise SLAM et hit-test pour l'ancrage spatial
 
 ## Prérequis
@@ -35,7 +36,8 @@ Ouvrez l'URL affichée dans un navigateur compatible, sur un appareil mobile.
 2. Autorisez l'accès à la caméra
 3. Pointez vers une surface plane
 4. Cliquez sur l'écran pour placer un tag
-5. Bougez la caméra : le tag reste en place
+5. Saisissez le nom du tag dans la boîte de dialogue
+6. Bougez la caméra : le tag reste en place et s'oriente vers vous
 
 ## Limitations
 

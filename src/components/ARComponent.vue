@@ -82,14 +82,60 @@ const startAR = async () => {
 
 const onSelect = () => {
   if (reticle.visible) {
-    // Créer un tag à la position du reticle
-    const tagGeometry = new THREE.SphereGeometry(0.05, 16, 16)
-    const tagMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 })
-    const tag = new THREE.Mesh(tagGeometry, tagMaterial)
-    tag.position.setFromMatrixPosition(reticle.matrix)
-    scene.add(tag)
-    tags.push(tag)
+    const name = prompt('Entrez le nom du tag :')
+    if (name && name.trim()) {
+      const tag = createTag(name.trim())
+      tag.position.setFromMatrixPosition(reticle.matrix)
+      scene.add(tag)
+      tags.push(tag)
+    }
   }
+}
+
+const createTag = (text: string): THREE.Mesh => {
+  // Créer un canvas pour le texte
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')!
+  canvas.width = 256
+  canvas.height = 128
+
+  // Fond semi-transparent
+  context.fillStyle = 'rgba(0, 0, 0, 0.7)'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+
+  // Bordure
+  context.strokeStyle = '#ffffff'
+  context.lineWidth = 2
+  context.strokeRect(5, 5, canvas.width - 10, canvas.height - 10)
+
+  // Texte
+  context.fillStyle = '#ffffff'
+  context.font = 'bold 24px Arial'
+  context.textAlign = 'center'
+  context.fillText(text, canvas.width / 2, canvas.height / 2 + 8)
+
+  // Créer texture
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.generateMipmaps = false
+  texture.minFilter = THREE.LinearFilter
+
+  // Créer matériau
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    side: THREE.DoubleSide
+  })
+
+  // Créer géométrie (plan)
+  const geometry = new THREE.PlaneGeometry(0.3, 0.15)
+
+  // Créer mesh
+  const mesh = new THREE.Mesh(geometry, material)
+
+  // Orienter vers la caméra (approximatif)
+  mesh.lookAt(camera.position)
+
+  return mesh
 }
 
 const render = (_timestamp: number, frame: any) => {
@@ -105,6 +151,11 @@ const render = (_timestamp: number, frame: any) => {
         reticle.visible = false
       }
     }
+
+    // Orienter les tags vers la caméra
+    tags.forEach(tag => {
+      tag.lookAt(camera.position)
+    })
   }
 
   renderer.render(scene, camera)
