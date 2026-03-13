@@ -1,18 +1,15 @@
 <template>
   <div id="ar-container" ref="container"></div>
-  <button @click="startAR" v-if="!isARStarted">Démarrer AR</button>
+  <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button>
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
-
-  <div v-if="isInputVisible" class="tag-input-overlay">
+  <!-- v-if="isInputVisible" -->
+  <div class="tag-input-overlay">
     <div class="tag-input-box">
       <label>
-        Nom du tag
-        <input
-          v-model="tagText"
-          @keydown.enter.prevent="confirmTagText"
-          placeholder="Entrez le texte..."
-          autofocus
-        />
+        <div class="tag-input-div">
+          Nom :
+          <input v-model="tagText" @keydown.enter.prevent="confirmTagText" placeholder="Entrez le nom..." autofocus />
+        </div>
       </label>
       <div class="tag-input-actions">
         <button @click="confirmTagText">Valider</button>
@@ -209,19 +206,24 @@ const render = (_timestamp: number, frame: any) => {
 </script>
 
 <style scoped>
+.btnStart {
+  padding: 12px 24px;
+  font-size: 18px;
+  background-color: #1d4ed8;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  margin: 20px;
+  z-index: 999999;
+}
+
 #ar-container {
   width: 100vw;
   height: 100vh;
   position: fixed;
   top: 0;
   left: 0;
-}
-
-button {
-  position: fixed;
-  top: 20px;
-  left: 20px;
-  z-index: 1000;
 }
 
 .tag-input-overlay {
@@ -247,8 +249,19 @@ button {
   gap: 12px;
 }
 
-.tag-input-box input {
+.tag-input-box .tag-input-div{
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   width: 100%;
+  gap: 8px;
+}
+
+.tag-input-box input {
+  display: block;
+  width: auto;
+  max-width: 100%;
   padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid rgba(0, 0, 0, 0.2);
