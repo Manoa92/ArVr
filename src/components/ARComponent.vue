@@ -59,7 +59,9 @@ const startAR = async () => {
   if (!isARSupported.value) return
 
   const session = await (navigator as any).xr.requestSession('immersive-ar', {
-    requiredFeatures: ['hit-test']
+    requiredFeatures: ['hit-test'],
+    optionalFeatures: ['dom-overlay'],
+    domOverlay: { root: document.body }
   })
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
@@ -210,7 +212,7 @@ button {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.55);
-  z-index: 2000;
+  z-index: 999999;
 }
 
 .tag-input-box {
