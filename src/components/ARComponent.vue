@@ -57,6 +57,10 @@ const startAR = async () => {
 
   container.value?.appendChild(renderer.domElement)
 
+  // Ajouter listener pour clics sur desktop et mobile
+  renderer.domElement.addEventListener('click', onSelect)
+  renderer.domElement.addEventListener('touchstart', onSelect)
+
   scene = new THREE.Scene()
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20)
 
@@ -221,7 +225,8 @@ const render = (_timestamp: number, frame: any) => {
   cursor: not-allowed;
 }
 
-.ui button:hover:not(:disabled) {
-  background-color: #0056b3;
+.ui input,
+.ui button {
+  pointer-events: auto;
 }
 </style>
