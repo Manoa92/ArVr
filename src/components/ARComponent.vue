@@ -19,7 +19,7 @@ let controller: THREE.Group
 let reticle: THREE.Mesh
 let hitTestSource: any = null
 let localReferenceSpace: any = null
-let tags: THREE.Mesh[] = []
+let tags: THREE.Object3D[] = []
 
 onMounted(() => {
   checkARSupport()
@@ -80,12 +80,51 @@ const startAR = async () => {
   isARStarted.value = true
 }
 
+const createTextSprite = (text: string) => {
+  const fontSize = 64
+  const padding = 20
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')!
+
+  context.font = `${fontSize}px Arial`
+  const textMetrics = context.measureText(text)
+  const textWidth = Math.ceil(textMetrics.width)
+  const textHeight = fontSize
+
+  canvas.width = textWidth + padding * 2
+  canvas.height = textHeight + padding * 2
+
+  // Need to set font again after resizing canvas
+  context.font = `${fontSize}px Arial`
+  context.textAlign = 'center'
+  context.textBaseline = 'middle'
+
+  // Background + text
+  context.fillStyle = 'rgba(0, 0, 0, 0.6)'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.fillStyle = 'white'
+  context.fillText(text, canvas.width / 2, canvas.height / 2)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.needsUpdate = true
+
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true })
+  const sprite = new THREE.Sprite(material)
+
+  // Scale the sprite so it appears at a reasonable size in AR
+  const scaleFactor = 0.0015
+  sprite.scale.set(canvas.width * scaleFactor, canvas.height * scaleFactor, 1)
+
+  return sprite
+}
+
 const onSelect = () => {
   if (reticle.visible) {
-    // Créer un tag à la position du reticle
-    const tagGeometry = new THREE.SphereGeometry(0.05, 16, 16)
-    const tagMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 })
-    const tag = new THREE.Mesh(tagGeometry, tagMaterial)
+    const text = window.prompt('Entrez le texte du tag :', '🎯')
+    if (!text) return
+
+    // Créer un tag texte à la position du reticle
+    const tag = createTextSprite(text)
     tag.position.setFromMatrixPosition(reticle.matrix)
     scene.add(tag)
     tags.push(tag)
