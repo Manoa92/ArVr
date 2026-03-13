@@ -182,6 +182,7 @@ const render = (_timestamp: number, frame: any) => {
   position: fixed;
   top: 0;
   left: 0;
+  z-index: 1;
 }
 
 .ui {
@@ -192,6 +193,10 @@ const render = (_timestamp: number, frame: any) => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 15px;
+  border-radius: 8px;
+  backdrop-filter: blur(5px);
 }
 
 .ui input {
