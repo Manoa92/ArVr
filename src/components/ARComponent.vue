@@ -72,6 +72,25 @@ const startAR = async () => {
 
   container.value?.appendChild(renderer.domElement)
 
+  const endARSession = () => {
+    renderer.setAnimationLoop(null)
+    isARStarted.value = false
+    isInputVisible.value = false
+
+    if (hitTestSource?.cancel) hitTestSource.cancel()
+    hitTestSource = null
+    localReferenceSpace = null
+
+    if (container.value?.contains(renderer.domElement)) {
+      container.value.removeChild(renderer.domElement)
+    }
+
+    // Optionally clean up WebGL resources
+    renderer.dispose()
+  }
+
+  session.addEventListener('end', endARSession)
+
   scene = new THREE.Scene()
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20)
 
