@@ -226,6 +226,8 @@ button {
 
 .tag-input-overlay {
   position: fixed;
+  width: 100vw;
+  left: 0;
   inset: 0;
   display: flex;
   align-items: center;
@@ -239,7 +241,7 @@ button {
   padding: 16px;
   border-radius: 12px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  width: 90vw;
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -256,7 +258,7 @@ button {
 
 .tag-input-actions {
   display: flex;
-  width: 100vw;
+  width: 100%;
   gap: 10px;
   justify-content: flex-end;
 }
