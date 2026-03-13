@@ -10,10 +10,10 @@
           <input v-model="tagText" @keydown.enter.prevent="confirmTagText" placeholder="Entrez le nom..." autofocus />
         </div>
       </label>
-      <div class="tag-input-actions">
+      <!-- <div class="tag-input-actions">
         <button @click="confirmTagText">Valider</button>
         <button @click="cancelTagText">Annuler</button>
-      </div>
+      </div> -->
     </div>
   </div>
 </template>
