@@ -34,10 +34,11 @@ Ouvrez l'URL affichée dans un navigateur compatible, sur un appareil mobile.
 
 1. Cliquez sur "Démarrer AR"
 2. Autorisez l'accès à la caméra
-3. Pointez vers une surface plane
-4. Cliquez sur l'écran pour placer un tag
-5. Saisissez le nom du tag dans la boîte de dialogue
-6. Bougez la caméra : le tag reste en place et s'oriente vers vous
+3. Saisissez le nom du tag dans le champ de texte
+4. Cliquez sur "Placer Tag" pour activer le mode placement
+5. Pointez vers une surface plane (le reticle apparaît)
+6. Cliquez sur l'écran pour placer le tag à cette position
+7. Bougez la caméra : le tag reste en place et s'oriente vers vous
 
 ## Limitations
 

@@ -1,6 +1,12 @@
 <template>
   <div id="ar-container" ref="container"></div>
-  <button @click="startAR" v-if="!isARStarted">Démarrer AR</button>
+  <div v-if="!isARStarted" class="ui">
+    <button @click="startAR">Démarrer AR</button>
+  </div>
+  <div v-if="isARStarted" class="ui">
+    <input v-model="tagName" placeholder="Nom du tag" />
+    <button @click="placeTag" :disabled="!tagName.trim()">Placer Tag</button>
+  </div>
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
 </template>
 
@@ -11,6 +17,7 @@ import * as THREE from 'three'
 const container = ref<HTMLDivElement>()
 const isARStarted = ref(false)
 const isARSupported = ref<boolean | null>(null)
+const tagName = ref('')
 
 let scene: THREE.Scene
 let camera: THREE.Camera
@@ -20,6 +27,7 @@ let reticle: THREE.Mesh
 let hitTestSource: any = null
 let localReferenceSpace: any = null
 let tags: THREE.Mesh[] = []
+let pendingTag = false
 
 onMounted(() => {
   checkARSupport()
@@ -81,14 +89,19 @@ const startAR = async () => {
 }
 
 const onSelect = () => {
-  if (reticle.visible) {
-    const name = prompt('Entrez le nom du tag :')
-    if (name && name.trim()) {
-      const tag = createTag(name.trim())
-      tag.position.setFromMatrixPosition(reticle.matrix)
-      scene.add(tag)
-      tags.push(tag)
-    }
+  if (reticle.visible && pendingTag && tagName.value.trim()) {
+    const tag = createTag(tagName.value.trim())
+    tag.position.setFromMatrixPosition(reticle.matrix)
+    scene.add(tag)
+    tags.push(tag)
+    pendingTag = false
+    tagName.value = ''
+  }
+}
+
+const placeTag = () => {
+  if (tagName.value.trim()) {
+    pendingTag = true
   }
 }
 
@@ -171,10 +184,39 @@ const render = (_timestamp: number, frame: any) => {
   left: 0;
 }
 
-button {
+.ui {
   position: fixed;
   top: 20px;
   left: 20px;
   z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ui input {
+  padding: 8px;
+  font-size: 16px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.ui button {
+  padding: 8px 16px;
+  font-size: 16px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ui button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+.ui button:hover:not(:disabled) {
+  background-color: #0056b3;
 }
 </style>
