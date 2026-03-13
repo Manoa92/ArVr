@@ -2,8 +2,7 @@
   <div id="ar-container" ref="container"></div>
   <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button>
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
-  <!-- v-if="isInputVisible" -->
-  <div class="tag-input-overlay">
+  <div  v-if="isInputVisible" class="tag-input-overlay">
     <div class="tag-input-box">
       <label>
         <div class="tag-input-div">
