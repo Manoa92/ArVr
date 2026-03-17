@@ -37,6 +37,10 @@ let hitTestSource: any = null
 let localReferenceSpace: any = null
 let tags: THREE.Object3D[] = []
 let pendingTagMatrix = new THREE.Matrix4()
+let smoothedReticleMatrix = new THREE.Matrix4()
+let reticleSmoothingFactor = 0.1 // Facteur de lissage (0.1 = lissage fort, 1.0 = pas de lissage)
+let recentMatrices: THREE.Matrix4[] = []
+const maxRecentMatrices = 5 // Nombre de matrices récentes à moyenner
 
 onMounted(() => {
   checkARSupport()
@@ -97,6 +101,9 @@ const startAR = async () => {
   reticle.matrixAutoUpdate = false
   reticle.visible = false
   scene.add(reticle)
+
+  // Initialiser la matrice lissée
+  smoothedReticleMatrix.identity()
 
   // Contrôleur pour les interactions
   controller = renderer.xr.getController(0)
@@ -193,9 +200,52 @@ const render = (_timestamp: number, frame: any) => {
         const hit = hitTestResults[0]
         const pose = hit.getPose(localReferenceSpace)
         reticle.visible = true
-        reticle.matrix.fromArray(pose.transform.matrix)
+
+        // Ajouter la nouvelle matrice aux récentes
+        const currentMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
+        recentMatrices.push(currentMatrix)
+        if (recentMatrices.length > maxRecentMatrices) {
+          recentMatrices.shift() // Garder seulement les dernières
+        }
+
+        // Calculer la moyenne des matrices récentes pour plus de stabilité
+        if (recentMatrices.length > 0) {
+          const positions: THREE.Vector3[] = []
+          const quaternions: THREE.Quaternion[] = []
+
+          recentMatrices.forEach(matrix => {
+            const pos = new THREE.Vector3()
+            const quat = new THREE.Quaternion()
+            const scl = new THREE.Vector3()
+            matrix.decompose(pos, quat, scl)
+            positions.push(pos)
+            quaternions.push(quat)
+          })
+
+          // Moyenner les positions
+          const avgPosition = positions.reduce((sum, pos) => sum.add(pos), new THREE.Vector3()).divideScalar(positions.length)
+
+          // Pour les quaternions, utiliser le premier comme base et slerp vers les autres
+          let avgQuaternion = quaternions[0].clone()
+          for (let i = 1; i < quaternions.length; i++) {
+            avgQuaternion.slerp(quaternions[i], 0.5)
+          }
+
+          const averageMatrix = new THREE.Matrix4()
+          averageMatrix.compose(avgPosition, avgQuaternion, new THREE.Vector3(1, 1, 1))
+
+          // Appliquer un lissage simple en interpolant vers la nouvelle matrice
+          const lerpFactor = reticleSmoothingFactor
+          for (let i = 0; i < 16; i++) {
+            smoothedReticleMatrix.elements[i] = THREE.MathUtils.lerp(smoothedReticleMatrix.elements[i], averageMatrix.elements[i], lerpFactor)
+          }
+
+          reticle.matrix.copy(smoothedReticleMatrix)
+        }
       } else {
         reticle.visible = false
+        // Réinitialiser les matrices récentes quand pas de hit-test
+        recentMatrices = []
       }
     }
   }
