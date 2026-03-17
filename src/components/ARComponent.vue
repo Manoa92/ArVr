@@ -33,6 +33,7 @@ let camera: THREE.Camera
 let renderer: THREE.WebGLRenderer
 let controller: THREE.Group
 let reticle: THREE.Mesh
+let reticleMaterial: THREE.MeshBasicMaterial
 let hitTestSource: any = null
 let localReferenceSpace: any = null
 let tags: THREE.Object3D[] = []
@@ -41,6 +42,17 @@ let smoothedReticleMatrix = new THREE.Matrix4()
 let reticleSmoothingFactor = 0.1 // Facteur de lissage (0.1 = lissage fort, 1.0 = pas de lissage)
 let recentMatrices: THREE.Matrix4[] = []
 const maxRecentMatrices = 5 // Nombre de matrices récentes à moyenner
+const minTagDistance = 0.1 // Distance minimale en mètres entre les tags
+
+const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
+  for (const tag of tags) {
+    const distance = tag.position.distanceTo(newPosition)
+    if (distance < minTagDistance) {
+      return true
+    }
+  }
+  return false
+}
 
 onMounted(() => {
   checkARSupport()
@@ -96,7 +108,7 @@ const startAR = async () => {
 
   // Créer le reticle pour indiquer où placer le tag
   const reticleGeometry = new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2)
-  const reticleMaterial = new THREE.MeshBasicMaterial()
+  reticleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff }) // Blanc par défaut
   reticle = new THREE.Mesh(reticleGeometry, reticleMaterial)
   reticle.matrixAutoUpdate = false
   reticle.visible = false
@@ -157,7 +169,7 @@ const createTextSprite = (text: string) => {
   const sprite = new THREE.Sprite(material)
 
   // Scale the sprite so it appears at a reasonable size in AR
-  const scaleFactor = 0.0015
+  const scaleFactor = 0.001 // Réduit pour éviter les chevauchements visuels
   sprite.scale.set(canvas.width * scaleFactor, canvas.height * scaleFactor, 1)
 
   return sprite
@@ -173,6 +185,17 @@ const onSelect = () => {
 const confirmTagText = () => {
   const text = tagText.value.trim()
   if (!text) {
+    cancelTagText()
+    return
+  }
+
+  // Vérifier si la position est trop proche d'un tag existant
+  const newPosition = new THREE.Vector3()
+  newPosition.setFromMatrixPosition(pendingTagMatrix)
+
+  if (isPositionTooClose(newPosition)) {
+    // Afficher un message d'erreur ou annuler
+    alert('Position trop proche d\'un tag existant. Veuillez choisir un autre emplacement.')
     cancelTagText()
     return
   }
@@ -241,6 +264,15 @@ const render = (_timestamp: number, frame: any) => {
           }
 
           reticle.matrix.copy(smoothedReticleMatrix)
+
+          // Vérifier si la position est trop proche d'un tag existant et changer la couleur
+          const currentPosition = new THREE.Vector3()
+          currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
+          if (isPositionTooClose(currentPosition)) {
+            reticleMaterial.color.setHex(0xff0000) // Rouge si trop proche
+          } else {
+            reticleMaterial.color.setHex(0xffffff) // Blanc sinon
+          }
         }
       } else {
         reticle.visible = false
