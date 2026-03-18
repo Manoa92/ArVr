@@ -1,8 +1,15 @@
 <template>
   <div id="ar-container" ref="container"></div>
-  <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button>
+  <div class="controls">
+    <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button>
+    <button class="btnStart" @click="stopAR" v-if="isARStarted">Arrêter AR</button>
+    <button class="btnStart" @click="toggleDeleteMode" v-if="isARStarted">
+      {{ isDeleteMode ? 'Quitter mode suppression' : 'Mode suppression' }}
+    </button>
+    <button class="btnStart" @click="clearAllTags" v-if="isARStarted">Effacer tous les tags</button>
+  </div>
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
-  <div  v-if="isInputVisible" class="tag-input-overlay">
+  <div v-if="isInputVisible" class="tag-input-overlay">
     <div class="tag-input-box">
       <label>
         <div class="tag-input-div">
@@ -27,6 +34,7 @@ const isARStarted = ref(false)
 const isARSupported = ref<boolean | null>(null)
 const isInputVisible = ref(false)
 const tagText = ref('')
+const isDeleteMode = ref(false)
 
 let scene: THREE.Scene
 let camera: THREE.Camera
@@ -36,6 +44,7 @@ let reticle: THREE.Mesh
 let reticleMaterial: THREE.MeshBasicMaterial
 let hitTestSource: any = null
 let localReferenceSpace: any = null
+let xrSession: any = null
 let tags: THREE.Object3D[] = []
 let pendingTagMatrix = new THREE.Matrix4()
 let smoothedReticleMatrix = new THREE.Matrix4()
@@ -43,6 +52,12 @@ let reticleSmoothingFactor = 0.1 // Facteur de lissage (0.1 = lissage fort, 1.0 
 let recentMatrices: THREE.Matrix4[] = []
 const maxRecentMatrices = 5 // Nombre de matrices récentes à moyenner
 const minTagDistance = 0.1 // Distance minimale en mètres entre les tags
+const TAGS_STORAGE_KEY = 'ar-tags-v1'
+
+type SavedTag = {
+  text: string
+  position: { x: number; y: number; z: number }
+}
 
 const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
   for (const tag of tags) {
@@ -52,6 +67,35 @@ const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
     }
   }
   return false
+}
+
+const saveTags = () => {
+  const data: SavedTag[] = tags.map(tag => {
+    const position = tag.position
+    return {
+      text: (tag.userData as any)?.text || '',
+      position: { x: position.x, y: position.y, z: position.z }
+    }
+  })
+  localStorage.setItem(TAGS_STORAGE_KEY, JSON.stringify(data))
+}
+
+const loadSavedTags = () => {
+  const raw = localStorage.getItem(TAGS_STORAGE_KEY)
+  if (!raw) return
+
+  try {
+    const data: SavedTag[] = JSON.parse(raw)
+    data.forEach(entry => {
+      const tag = createTextSprite(entry.text)
+      tag.position.set(entry.position.x, entry.position.y, entry.position.z)
+      ;(tag.userData as any) = { text: entry.text }
+      scene.add(tag)
+      tags.push(tag)
+    })
+  } catch (e) {
+    console.warn('Impossible de charger les tags sauvegardés', e)
+  }
 }
 
 onMounted(() => {
@@ -88,10 +132,12 @@ const startAR = async () => {
     renderer.setAnimationLoop(null)
     isARStarted.value = false
     isInputVisible.value = false
+    isDeleteMode.value = false
 
     if (hitTestSource?.cancel) hitTestSource.cancel()
     hitTestSource = null
     localReferenceSpace = null
+    xrSession = null
 
     if (container.value?.contains(renderer.domElement)) {
       container.value.removeChild(renderer.domElement)
@@ -103,8 +149,16 @@ const startAR = async () => {
 
   session.addEventListener('end', endARSession)
 
+  // Réinitialiser l'état des tags pour cette session (ils seront rechargés depuis le stockage)
+  tags = []
+
+  xrSession = session
+
   scene = new THREE.Scene()
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20)
+
+  // Charger les tags précédemment sauvegardés
+  loadSavedTags()
 
   // Créer le reticle pour indiquer où placer le tag
   const reticleGeometry = new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2)
@@ -177,6 +231,30 @@ const createTextSprite = (text: string) => {
 
 const onSelect = () => {
   if (!reticle.visible) return
+
+  // Si on est en mode suppression : on supprime le tag le plus proche
+  if (isDeleteMode.value) {
+    const clickPosition = new THREE.Vector3().setFromMatrixPosition(reticle.matrix)
+    let closestTag: THREE.Object3D | null = null
+    let closestDistance = Infinity
+
+    for (const tag of tags) {
+      const distance = tag.position.distanceTo(clickPosition)
+      if (distance < closestDistance) {
+        closestDistance = distance
+        closestTag = tag
+      }
+    }
+
+    if (closestTag && closestDistance < minTagDistance * 2) {
+      scene.remove(closestTag)
+      tags = tags.filter(t => t !== closestTag)
+      saveTags()
+    }
+
+    return
+  }
+
   pendingTagMatrix.copy(reticle.matrix)
   tagText.value = ''
   isInputVisible.value = true
@@ -203,12 +281,30 @@ const confirmTagText = () => {
   // Créer un tag texte à la position mémorisée
   const tag = createTextSprite(text)
   tag.position.setFromMatrixPosition(pendingTagMatrix)
+  ;(tag.userData as any) = { text }
   scene.add(tag)
   tags.push(tag)
+  saveTags()
 
   isInputVisible.value = false
   tagText.value = ''
 }
+
+const toggleDeleteMode = () => {
+  isDeleteMode.value = !isDeleteMode.value
+}
+
+const clearAllTags = () => {
+  tags.forEach(tag => scene.remove(tag))
+  tags = []
+  saveTags()
+}
+
+const stopAR = () => {
+  isDeleteMode.value = false
+  xrSession?.end()
+}
+
 
 const cancelTagText = () => {
   isInputVisible.value = false
@@ -265,13 +361,17 @@ const render = (_timestamp: number, frame: any) => {
 
           reticle.matrix.copy(smoothedReticleMatrix)
 
-          // Vérifier si la position est trop proche d'un tag existant et changer la couleur
-          const currentPosition = new THREE.Vector3()
-          currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
-          if (isPositionTooClose(currentPosition)) {
-            reticleMaterial.color.setHex(0xff0000) // Rouge si trop proche
+          // Montrer visuellement le mode suppression ou la proximité d'un tag
+          if (isDeleteMode.value) {
+            reticleMaterial.color.setHex(0xff0000)
           } else {
-            reticleMaterial.color.setHex(0xffffff) // Blanc sinon
+            const currentPosition = new THREE.Vector3()
+            currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
+            if (isPositionTooClose(currentPosition)) {
+              reticleMaterial.color.setHex(0xff0000) // Rouge si trop proche
+            } else {
+              reticleMaterial.color.setHex(0xffffff) // Blanc sinon
+            }
           }
         }
       } else {
