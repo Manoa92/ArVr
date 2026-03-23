@@ -2,7 +2,20 @@
   <div id="ar-container" ref="container"></div>
   <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button>
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
-  <div  v-if="isInputVisible" class="tag-input-overlay">
+  
+  <!-- Indicateurs d'état -->
+  <div class="status-indicators">
+    <div class="status-item" :class="{ ready: isARSupported === true, error: isARSupported === false }">
+      <span class="status-dot"></span>
+      <span>AR: {{ isARSupported === true ? 'Prêt' : isARSupported === false ? 'Non supporté' : 'Vérification...' }}</span>
+    </div>
+    <div class="status-item" :class="{ ready: isAIModelLoaded, loading: isAILoading }">
+      <span class="status-dot"></span>
+      <span>IA: {{ isAIModelLoaded ? 'Prête' : isAILoading ? 'Chargement...' : 'Non chargée' }}</span>
+    </div>
+  </div>
+  
+  <div v-if="isInputVisible" class="tag-input-overlay">
     <div class="tag-input-box">
       <label>
         <div class="tag-input-div">
@@ -28,6 +41,8 @@ const isARStarted = ref(false)
 const isARSupported = ref<boolean | null>(null)
 const isInputVisible = ref(false)
 const tagText = ref('')
+const isAIModelLoaded = ref(false)
+const isAILoading = ref(false)
 
 let scene: THREE.Scene
 let camera: THREE.Camera
@@ -100,11 +115,16 @@ const startAR = async () => {
   if (!isARSupported.value) return
 
   // Charger le modèle de détection d'objets
+  isAILoading.value = true
   try {
     model = await cocoSsd.load()
+    isAIModelLoaded.value = true
     console.log('Modèle COCO-SSD chargé')
   } catch (error) {
     console.error('Erreur lors du chargement du modèle:', error)
+    isAIModelLoaded.value = false
+  } finally {
+    isAILoading.value = false
   }
 
   // Créer un élément vidéo pour capturer l'image de la caméra
@@ -450,6 +470,69 @@ const render = async (_timestamp: number, frame: any) => {
   cursor: pointer;
   margin: 20px;
   z-index: 999999;
+}
+
+.status-indicators {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 1000;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.status-item.ready {
+  background: rgba(34, 197, 94, 0.9);
+}
+
+.status-item.loading {
+  background: rgba(251, 191, 36, 0.9);
+}
+
+.status-item.error {
+  background: rgba(239, 68, 68, 0.9);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #666;
+}
+
+.status-item.ready .status-dot {
+  background: #22c55e;
+}
+
+.status-item.loading .status-dot {
+  background: #fbbf24;
+  animation: pulse 1.5s infinite;
+}
+
+.status-item.error .status-dot {
+  background: #ef4444;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 #ar-container {
