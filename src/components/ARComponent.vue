@@ -21,6 +21,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import * as THREE from 'three'
+import * as cocoSsd from '@tensorflow-models/coco-ssd'
 
 const container = ref<HTMLDivElement>()
 const isARStarted = ref(false)
@@ -39,15 +40,43 @@ let localReferenceSpace: any = null
 let tags: THREE.Object3D[] = []
 let pendingTagMatrix = new THREE.Matrix4()
 let smoothedReticleMatrix = new THREE.Matrix4()
-let reticleSmoothingFactor = 0.1 // Facteur de lissage (0.1 = lissage fort, 1.0 = pas de lissage)
+let reticleSmoothingFactor = 0.05 // Réduit pour plus de stabilité
 let recentMatrices: THREE.Matrix4[] = []
-const maxRecentMatrices = 5 // Nombre de matrices récentes à moyenner
+const maxRecentMatrices = 10 // Augmenté pour plus de stabilité
 const minTagDistance = 0.1 // Distance minimale en mètres entre les tags
+
+// Nouvelles variables pour la détection d'objets
+let model: cocoSsd.ObjectDetection | null = null
+let detectedObjects: cocoSsd.DetectedObject[] = []
+let videoElement: HTMLVideoElement | null = null
+let canvasElement: HTMLCanvasElement | null = null
+let context: CanvasRenderingContext2D | null = null
+const detectionThreshold = 0.5 // Seuil de confiance pour la détection
 
 const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
   for (const tag of tags) {
     const distance = tag.position.distanceTo(newPosition)
     if (distance < minTagDistance) {
+      return true
+    }
+  }
+  return false
+}
+
+const isScreenOverlap = (position: THREE.Vector3): boolean => {
+  const screenPos = new THREE.Vector3()
+  screenPos.copy(position).project(camera)
+  const screenX = (screenPos.x + 1) * window.innerWidth / 2
+  const screenY = (-screenPos.y + 1) * window.innerHeight / 2
+
+  for (const tag of tags) {
+    const tagScreenPos = new THREE.Vector3()
+    tagScreenPos.copy(tag.position).project(camera)
+    const tagScreenX = (tagScreenPos.x + 1) * window.innerWidth / 2
+    const tagScreenY = (-tagScreenPos.y + 1) * window.innerHeight / 2
+
+    const distance = Math.sqrt((screenX - tagScreenX) ** 2 + (screenY - tagScreenY) ** 2)
+    if (distance < 100) { // Distance minimale en pixels
       return true
     }
   }
@@ -69,6 +98,38 @@ const checkARSupport = async () => {
 
 const startAR = async () => {
   if (!isARSupported.value) return
+
+  // Charger le modèle de détection d'objets
+  try {
+    model = await cocoSsd.load()
+    console.log('Modèle COCO-SSD chargé')
+  } catch (error) {
+    console.error('Erreur lors du chargement du modèle:', error)
+  }
+
+  // Créer un élément vidéo pour capturer l'image de la caméra
+  videoElement = document.createElement('video')
+  videoElement.width = 640
+  videoElement.height = 480
+  videoElement.style.display = 'none'
+  document.body.appendChild(videoElement)
+
+  // Créer un canvas pour analyser l'image
+  canvasElement = document.createElement('canvas')
+  canvasElement.width = 640
+  canvasElement.height = 480
+  canvasElement.style.display = 'none'
+  document.body.appendChild(canvasElement)
+  context = canvasElement.getContext('2d')
+
+  // Démarrer la caméra
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+    videoElement.srcObject = stream
+    videoElement.play()
+  } catch (error) {
+    console.error('Erreur d\'accès à la caméra:', error)
+  }
 
   const session = await (navigator as any).xr.requestSession('immersive-ar', {
     requiredFeatures: ['hit-test'],
@@ -95,6 +156,16 @@ const startAR = async () => {
 
     if (container.value?.contains(renderer.domElement)) {
       container.value.removeChild(renderer.domElement)
+    }
+
+    // Nettoyer les éléments vidéo et canvas
+    if (videoElement && videoElement.parentNode) {
+      videoElement.parentNode.removeChild(videoElement)
+      videoElement = null
+    }
+    if (canvasElement && canvasElement.parentNode) {
+      canvasElement.parentNode.removeChild(canvasElement)
+      canvasElement = null
     }
 
     // Optionally clean up WebGL resources
@@ -193,9 +264,8 @@ const confirmTagText = () => {
   const newPosition = new THREE.Vector3()
   newPosition.setFromMatrixPosition(pendingTagMatrix)
 
-  if (isPositionTooClose(newPosition)) {
-    // Afficher un message d'erreur ou annuler
-    alert('Position trop proche d\'un tag existant. Veuillez choisir un autre emplacement.')
+  if (isPositionTooClose(newPosition) || isScreenOverlap(newPosition)) {
+    alert('Position trop proche d\'un tag existant ou chevauchement visuel. Veuillez choisir un autre emplacement.')
     cancelTagText()
     return
   }
@@ -203,6 +273,38 @@ const confirmTagText = () => {
   // Créer un tag texte à la position mémorisée
   const tag = createTextSprite(text)
   tag.position.setFromMatrixPosition(pendingTagMatrix)
+
+  // Si un objet est détecté près de cette position, attacher le tag à cet objet pour plus de stabilité
+  if (detectedObjects.length > 0) {
+    // Trouver l'objet le plus proche de la position du tag
+    const tagScreenPos = new THREE.Vector3()
+    tagScreenPos.copy(tag.position).project(camera)
+    const tagScreenX = (tagScreenPos.x + 1) * window.innerWidth / 2
+    const tagScreenY = (-tagScreenPos.y + 1) * window.innerHeight / 2
+
+    let closestObject: cocoSsd.DetectedObject | null = null
+    let minDistance = Infinity
+
+    for (const obj of detectedObjects) {
+      const objCenterX = (obj.bbox[0] + obj.bbox[2]) / 2
+      const objCenterY = (obj.bbox[1] + obj.bbox[3]) / 2
+      // Convertir les coordonnées de l'objet en coordonnées écran (approximatif)
+      const objScreenX = objCenterX * (window.innerWidth / canvasElement!.width)
+      const objScreenY = objCenterY * (window.innerHeight / canvasElement!.height)
+      const distance = Math.sqrt((tagScreenX - objScreenX) ** 2 + (tagScreenY - objScreenY) ** 2)
+      if (distance < minDistance) {
+        minDistance = distance
+        closestObject = obj
+      }
+    }
+
+    if (closestObject && minDistance < 150) { // Si l'objet est assez proche
+      // Attacher le tag à l'objet détecté (logique simplifiée : garder la position mais marquer comme ancré)
+      tag.userData.anchoredObject = closestObject
+      console.log(`Tag "${text}" ancré à l'objet: ${closestObject.class}`)
+    }
+  }
+
   scene.add(tag)
   tags.push(tag)
 
@@ -215,72 +317,123 @@ const cancelTagText = () => {
   tagText.value = ''
 }
 
-const render = (_timestamp: number, frame: any) => {
+const render = async (_timestamp: number, frame: any) => {
+  // Détection d'objets dans l'image
+  if (model && videoElement && context && videoElement.readyState === 4) {
+    context.drawImage(videoElement, 0, 0, canvasElement!.width, canvasElement!.height)
+    try {
+      detectedObjects = await model.detect(canvasElement!)
+      // Filtrer les objets avec une confiance suffisante
+      detectedObjects = detectedObjects.filter(obj => obj.score > detectionThreshold)
+    } catch (error) {
+      console.error('Erreur de détection:', error)
+    }
+  }
+
   if (frame) {
     if (hitTestSource && localReferenceSpace) {
       const hitTestResults = frame.getHitTestResults(hitTestSource)
-      if (hitTestResults.length) {
+      if (hitTestResults.length && detectedObjects.length > 0) {
         const hit = hitTestResults[0]
         const pose = hit.getPose(localReferenceSpace)
         reticle.visible = true
 
-        // Ajouter la nouvelle matrice aux récentes
-        const currentMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
-        recentMatrices.push(currentMatrix)
-        if (recentMatrices.length > maxRecentMatrices) {
-          recentMatrices.shift() // Garder seulement les dernières
+        // Utiliser les objets détectés pour ajuster la position du reticle
+        // Trouver l'objet détecté le plus central
+        const centerX = canvasElement!.width / 2
+        const centerY = canvasElement!.height / 2
+        let closestObject: cocoSsd.DetectedObject | null = null
+        let minDistance = Infinity
+
+        for (const obj of detectedObjects) {
+          const objCenterX = (obj.bbox[0] + obj.bbox[2]) / 2
+          const objCenterY = (obj.bbox[1] + obj.bbox[3]) / 2
+          const distance = Math.sqrt((objCenterX - centerX) ** 2 + (objCenterY - centerY) ** 2)
+          if (distance < minDistance) {
+            minDistance = distance
+            closestObject = obj
+          }
         }
 
-        // Calculer la moyenne des matrices récentes pour plus de stabilité
-        if (recentMatrices.length > 0) {
-          const positions: THREE.Vector3[] = []
-          const quaternions: THREE.Quaternion[] = []
-
-          recentMatrices.forEach(matrix => {
-            const pos = new THREE.Vector3()
-            const quat = new THREE.Quaternion()
-            const scl = new THREE.Vector3()
-            matrix.decompose(pos, quat, scl)
-            positions.push(pos)
-            quaternions.push(quat)
-          })
-
-          // Moyenner les positions
-          const avgPosition = positions.reduce((sum, pos) => sum.add(pos), new THREE.Vector3()).divideScalar(positions.length)
-
-          // Pour les quaternions, utiliser le premier comme base et slerp vers les autres
-          let avgQuaternion = quaternions[0].clone()
-          for (let i = 1; i < quaternions.length; i++) {
-            avgQuaternion.slerp(quaternions[i], 0.5)
+        if (closestObject) {
+          // Ajuster la matrice du reticle basée sur l'objet détecté
+          const currentMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
+          // Ici, on pourrait ajuster la position basée sur la bbox de l'objet, mais pour simplicité, on garde le hit-test
+          recentMatrices.push(currentMatrix)
+          if (recentMatrices.length > maxRecentMatrices) {
+            recentMatrices.shift()
           }
 
-          const averageMatrix = new THREE.Matrix4()
-          averageMatrix.compose(avgPosition, avgQuaternion, new THREE.Vector3(1, 1, 1))
+          // Calculer la moyenne avec un lissage amélioré
+          if (recentMatrices.length > 0) {
+            const positions: THREE.Vector3[] = []
+            const quaternions: THREE.Quaternion[] = []
 
-          // Appliquer un lissage simple en interpolant vers la nouvelle matrice
-          const lerpFactor = reticleSmoothingFactor
-          for (let i = 0; i < 16; i++) {
-            smoothedReticleMatrix.elements[i] = THREE.MathUtils.lerp(smoothedReticleMatrix.elements[i], averageMatrix.elements[i], lerpFactor)
+            recentMatrices.forEach(matrix => {
+              const pos = new THREE.Vector3()
+              const quat = new THREE.Quaternion()
+              const scl = new THREE.Vector3()
+              matrix.decompose(pos, quat, scl)
+              positions.push(pos)
+              quaternions.push(quat)
+            })
+
+            const avgPosition = positions.reduce((sum, pos) => sum.add(pos), new THREE.Vector3()).divideScalar(positions.length)
+            let avgQuaternion = quaternions[0].clone()
+            for (let i = 1; i < quaternions.length; i++) {
+              avgQuaternion.slerp(quaternions[i], 0.5)
+            }
+
+            const averageMatrix = new THREE.Matrix4()
+            averageMatrix.compose(avgPosition, avgQuaternion, new THREE.Vector3(1, 1, 1))
+
+            const lerpFactor = reticleSmoothingFactor
+            for (let i = 0; i < 16; i++) {
+              smoothedReticleMatrix.elements[i] = THREE.MathUtils.lerp(smoothedReticleMatrix.elements[i], averageMatrix.elements[i], lerpFactor)
+            }
+
+            reticle.matrix.copy(smoothedReticleMatrix)
+
+            // Vérifier les chevauchements en coordonnées écran
+            const currentPosition = new THREE.Vector3()
+            currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
+            if (isPositionTooClose(currentPosition) || isScreenOverlap(currentPosition)) {
+              reticleMaterial.color.setHex(0xff0000) // Rouge si chevauchement
+            } else {
+              reticleMaterial.color.setHex(0xffffff) // Blanc sinon
+            }
           }
-
-          reticle.matrix.copy(smoothedReticleMatrix)
-
-          // Vérifier si la position est trop proche d'un tag existant et changer la couleur
-          const currentPosition = new THREE.Vector3()
-          currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
-          if (isPositionTooClose(currentPosition)) {
-            reticleMaterial.color.setHex(0xff0000) // Rouge si trop proche
-          } else {
-            reticleMaterial.color.setHex(0xffffff) // Blanc sinon
-          }
+        } else {
+          reticle.visible = false
         }
       } else {
         reticle.visible = false
-        // Réinitialiser les matrices récentes quand pas de hit-test
         recentMatrices = []
       }
     }
   }
+
+  // Mettre à jour les positions des tags ancrés aux objets détectés
+  tags.forEach(tag => {
+    if (tag.userData.anchoredObject) {
+      const anchoredObj = tag.userData.anchoredObject as cocoSsd.DetectedObject
+      // Trouver l'objet correspondant dans les détections actuelles
+      const currentObj = detectedObjects.find(obj => obj.class === anchoredObj.class && 
+        Math.abs(obj.bbox[0] - anchoredObj.bbox[0]) < 50 && // Tolérance pour le suivi
+        Math.abs(obj.bbox[1] - anchoredObj.bbox[1]) < 50)
+
+      if (currentObj) {
+        // Mettre à jour la position du tag basée sur la nouvelle position de l'objet
+        // Conversion simplifiée : ajuster la position 3D basée sur les changements dans l'image
+        const deltaX = (currentObj.bbox[0] - anchoredObj.bbox[0]) * 0.001 // Facteur d'échelle
+        const deltaY = (currentObj.bbox[1] - anchoredObj.bbox[1]) * 0.001
+        tag.position.x += deltaX
+        tag.position.y -= deltaY // Inverser Y car l'image est inversée
+        // Mettre à jour l'objet ancré
+        tag.userData.anchoredObject = currentObj
+      }
+    }
+  })
 
   renderer.render(scene, camera)
 }
