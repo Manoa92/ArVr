@@ -352,78 +352,82 @@ const render = async (_timestamp: number, frame: any) => {
   if (frame) {
     if (hitTestSource && localReferenceSpace) {
       const hitTestResults = frame.getHitTestResults(hitTestSource)
-      if (hitTestResults.length && detectedObjects.length > 0) {
+      if (hitTestResults.length) {
         const hit = hitTestResults[0]
         const pose = hit.getPose(localReferenceSpace)
         reticle.visible = true
 
-        // Utiliser les objets détectés pour ajuster la position du reticle
-        // Trouver l'objet détecté le plus central
-        const centerX = canvasElement!.width / 2
-        const centerY = canvasElement!.height / 2
-        let closestObject: cocoSsd.DetectedObject | null = null
-        let minDistance = Infinity
+        // Calcul de la position de base depuis le hit-test
+        const currentMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
+        recentMatrices.push(currentMatrix)
+        if (recentMatrices.length > maxRecentMatrices) {
+          recentMatrices.shift()
+        }
 
-        for (const obj of detectedObjects) {
-          const objCenterX = (obj.bbox[0] + obj.bbox[2]) / 2
-          const objCenterY = (obj.bbox[1] + obj.bbox[3]) / 2
-          const distance = Math.sqrt((objCenterX - centerX) ** 2 + (objCenterY - centerY) ** 2)
-          if (distance < minDistance) {
-            minDistance = distance
-            closestObject = obj
+        // Calculer la moyenne avec un lissage amélioré
+        if (recentMatrices.length > 0) {
+          const positions: THREE.Vector3[] = []
+          const quaternions: THREE.Quaternion[] = []
+
+          recentMatrices.forEach(matrix => {
+            const pos = new THREE.Vector3()
+            const quat = new THREE.Quaternion()
+            const scl = new THREE.Vector3()
+            matrix.decompose(pos, quat, scl)
+            positions.push(pos)
+            quaternions.push(quat)
+          })
+
+          const avgPosition = positions.reduce((sum, pos) => sum.add(pos), new THREE.Vector3()).divideScalar(positions.length)
+          let avgQuaternion = quaternions[0].clone()
+          for (let i = 1; i < quaternions.length; i++) {
+            avgQuaternion.slerp(quaternions[i], 0.5)
+          }
+
+          const averageMatrix = new THREE.Matrix4()
+          averageMatrix.compose(avgPosition, avgQuaternion, new THREE.Vector3(1, 1, 1))
+
+          const lerpFactor = reticleSmoothingFactor
+          for (let i = 0; i < 16; i++) {
+            smoothedReticleMatrix.elements[i] = THREE.MathUtils.lerp(smoothedReticleMatrix.elements[i], averageMatrix.elements[i], lerpFactor)
+          }
+
+          reticle.matrix.copy(smoothedReticleMatrix)
+
+          // Vérifier les chevauchements en coordonnées écran
+          const currentPosition = new THREE.Vector3()
+          currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
+          if (isPositionTooClose(currentPosition) || isScreenOverlap(currentPosition)) {
+            reticleMaterial.color.setHex(0xff0000) // Rouge si chevauchement
+          } else {
+            reticleMaterial.color.setHex(0xffffff) // Blanc sinon
           }
         }
 
-        if (closestObject) {
-          // Ajuster la matrice du reticle basée sur l'objet détecté
-          const currentMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
-          // Ici, on pourrait ajuster la position basée sur la bbox de l'objet, mais pour simplicité, on garde le hit-test
-          recentMatrices.push(currentMatrix)
-          if (recentMatrices.length > maxRecentMatrices) {
-            recentMatrices.shift()
-          }
-
-          // Calculer la moyenne avec un lissage amélioré
-          if (recentMatrices.length > 0) {
-            const positions: THREE.Vector3[] = []
-            const quaternions: THREE.Quaternion[] = []
-
-            recentMatrices.forEach(matrix => {
-              const pos = new THREE.Vector3()
-              const quat = new THREE.Quaternion()
-              const scl = new THREE.Vector3()
-              matrix.decompose(pos, quat, scl)
-              positions.push(pos)
-              quaternions.push(quat)
-            })
-
-            const avgPosition = positions.reduce((sum, pos) => sum.add(pos), new THREE.Vector3()).divideScalar(positions.length)
-            let avgQuaternion = quaternions[0].clone()
-            for (let i = 1; i < quaternions.length; i++) {
-              avgQuaternion.slerp(quaternions[i], 0.5)
-            }
-
-            const averageMatrix = new THREE.Matrix4()
-            averageMatrix.compose(avgPosition, avgQuaternion, new THREE.Vector3(1, 1, 1))
-
-            const lerpFactor = reticleSmoothingFactor
-            for (let i = 0; i < 16; i++) {
-              smoothedReticleMatrix.elements[i] = THREE.MathUtils.lerp(smoothedReticleMatrix.elements[i], averageMatrix.elements[i], lerpFactor)
-            }
-
-            reticle.matrix.copy(smoothedReticleMatrix)
-
-            // Vérifier les chevauchements en coordonnées écran
-            const currentPosition = new THREE.Vector3()
-            currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
-            if (isPositionTooClose(currentPosition) || isScreenOverlap(currentPosition)) {
-              reticleMaterial.color.setHex(0xff0000) // Rouge si chevauchement
-            } else {
-              reticleMaterial.color.setHex(0xffffff) // Blanc sinon
-            }
-          }
+        // Si l'objet n'est pas détecté en IA, on garde le reticle AR activé (mode fallback)
+        if (detectedObjects.length === 0) {
+          // mode de base, on n'ajuste pas à l'objet IA
         } else {
-          reticle.visible = false
+          // Si on a des objets, on peut basculer dessus pour plus de stabilité
+          const centerX = canvasElement!.width / 2
+          const centerY = canvasElement!.height / 2
+          let closestObject: cocoSsd.DetectedObject | null = null
+          let minDistance = Infinity
+
+          for (const obj of detectedObjects) {
+            const objCenterX = (obj.bbox[0] + obj.bbox[2]) / 2
+            const objCenterY = (obj.bbox[1] + obj.bbox[3]) / 2
+            const distance = Math.sqrt((objCenterX - centerX) ** 2 + (objCenterY - centerY) ** 2)
+            if (distance < minDistance) {
+              minDistance = distance
+              closestObject = obj
+            }
+          }
+
+          if (closestObject) {
+            // On conserve le positionnement via hit-test mais c'est bien rassurant d'enregistrer l'objet
+            // (option possible : appliquer une correction ici lorsque l'IA est très fiable)
+          }
         }
       } else {
         reticle.visible = false
@@ -472,6 +476,7 @@ const render = async (_timestamp: number, frame: any) => {
 }
 
 .status-indicators {
+  position: fixed;
   top: 20px;
   right: 20px;
   display: flex;
