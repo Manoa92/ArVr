@@ -99,6 +99,7 @@ const isScreenOverlap = (position: THREE.Vector3): boolean => {
 
 onMounted(() => {
   checkARSupport()
+  loadAIModel()
 })
 
 const checkARSupport = async () => {
@@ -110,20 +111,33 @@ const checkARSupport = async () => {
   }
 }
 
-const startAR = async () => {
-  if (!isARSupported.value) return
+const loadAIModel = async () => {
+  if (model) return
 
-  // Charger le modèle de détection d'objets
   isAILoading.value = true
+  isAIModelLoaded.value = false
+
   try {
+    // Charger TensorFlow.js uniquement si nécessaire, puis le modèle COCO-SSD.
+    const tfModule = await import('@tensorflow/tfjs')
+    await tfModule.ready()
     model = await cocoSsd.load()
     isAIModelLoaded.value = true
     console.log('Modèle COCO-SSD chargé')
   } catch (error) {
-    console.error('Erreur lors du chargement du modèle:', error)
+    console.error('Erreur lors du chargement du modèle IA :', error)
     isAIModelLoaded.value = false
   } finally {
     isAILoading.value = false
+  }
+}
+
+const startAR = async () => {
+  if (!isARSupported.value) return
+
+  // Si modèle IA non chargé encore, tenter à nouveau
+  if (!model && !isAILoading.value) {
+    await loadAIModel()
   }
 
   // Créer un élément vidéo pour capturer l'image de la caméra
