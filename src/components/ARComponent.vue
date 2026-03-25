@@ -28,6 +28,12 @@ const isARSupported = ref<boolean | null>(null)
 const isInputVisible = ref(false)
 const tagText = ref('')
 
+interface TagObject {
+  sprite: THREE.Sprite
+  anchor?: any
+  baseMatrix?: THREE.Matrix4
+}
+
 let scene: THREE.Scene
 let camera: THREE.Camera
 let renderer: THREE.WebGLRenderer
@@ -36,7 +42,8 @@ let reticle: THREE.Mesh
 let reticleMaterial: THREE.MeshBasicMaterial
 let hitTestSource: any = null
 let localReferenceSpace: any = null
-let tags: THREE.Object3D[] = []
+let lastHitTestResult: any = null
+let tags: TagObject[] = []
 let pendingTagMatrix = new THREE.Matrix4()
 let smoothedReticleMatrix = new THREE.Matrix4()
 let reticleSmoothingFactor = 0.1 // Facteur de lissage (0.1 = lissage fort, 1.0 = pas de lissage)
@@ -46,7 +53,9 @@ const minTagDistance = 0.1 // Distance minimale en mètres entre les tags
 
 const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
   for (const tag of tags) {
-    const distance = tag.position.distanceTo(newPosition)
+    const pos = new THREE.Vector3()
+    pos.setFromMatrixPosition(tag.sprite.matrixWorld)
+    const distance = pos.distanceTo(newPosition)
     if (distance < minTagDistance) {
       return true
     }
@@ -96,6 +105,19 @@ const startAR = async () => {
     if (container.value?.contains(renderer.domElement)) {
       container.value.removeChild(renderer.domElement)
     }
+
+    // Nettoyer les ancres et tags
+    for (const tag of tags) {
+      if (tag.anchor && tag.anchor.delete) {
+        try {
+          tag.anchor.delete()
+        } catch {
+          // ignore
+        }
+      }
+      scene.remove(tag.sprite)
+    }
+    tags = []
 
     // Optionally clean up WebGL resources
     renderer.dispose()
@@ -200,11 +222,27 @@ const confirmTagText = () => {
     return
   }
 
-  // Créer un tag texte à la position mémorisée
-  const tag = createTextSprite(text)
-  tag.position.setFromMatrixPosition(pendingTagMatrix)
-  scene.add(tag)
-  tags.push(tag)
+  const placeTag = (matrix: THREE.Matrix4, anchor?: any) => {
+    const tag = createTextSprite(text)
+    tag.position.setFromMatrixPosition(matrix)
+    scene.add(tag)
+    tags.push({ sprite: tag, anchor, baseMatrix: matrix.clone() })
+  }
+
+  const placeWithAnchor = async () => {
+    if (lastHitTestResult?.createAnchor) {
+      try {
+        const anchor = await lastHitTestResult.createAnchor()
+        placeTag(pendingTagMatrix, anchor)
+        return
+      } catch (err) {
+        console.warn('WebXR anchor creation failed, fallback on position only', err)
+      }
+    }
+    placeTag(pendingTagMatrix)
+  }
+
+  placeWithAnchor().catch(() => placeTag(pendingTagMatrix))
 
   isInputVisible.value = false
   tagText.value = ''
@@ -221,63 +259,81 @@ const render = (_timestamp: number, frame: any) => {
       const hitTestResults = frame.getHitTestResults(hitTestSource)
       if (hitTestResults.length) {
         const hit = hitTestResults[0]
+        lastHitTestResult = hit
         const pose = hit.getPose(localReferenceSpace)
-        reticle.visible = true
 
-        // Ajouter la nouvelle matrice aux récentes
-        const currentMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
-        recentMatrices.push(currentMatrix)
-        if (recentMatrices.length > maxRecentMatrices) {
-          recentMatrices.shift() // Garder seulement les dernières
-        }
+        if (pose) {
+          reticle.visible = true
 
-        // Calculer la moyenne des matrices récentes pour plus de stabilité
-        if (recentMatrices.length > 0) {
-          const positions: THREE.Vector3[] = []
-          const quaternions: THREE.Quaternion[] = []
-
-          recentMatrices.forEach(matrix => {
-            const pos = new THREE.Vector3()
-            const quat = new THREE.Quaternion()
-            const scl = new THREE.Vector3()
-            matrix.decompose(pos, quat, scl)
-            positions.push(pos)
-            quaternions.push(quat)
-          })
-
-          // Moyenner les positions
-          const avgPosition = positions.reduce((sum, pos) => sum.add(pos), new THREE.Vector3()).divideScalar(positions.length)
-
-          // Pour les quaternions, utiliser le premier comme base et slerp vers les autres
-          let avgQuaternion = quaternions[0].clone()
-          for (let i = 1; i < quaternions.length; i++) {
-            avgQuaternion.slerp(quaternions[i], 0.5)
+          // Ajouter la nouvelle matrice aux récentes
+          const currentMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
+          recentMatrices.push(currentMatrix)
+          if (recentMatrices.length > maxRecentMatrices) {
+            recentMatrices.shift() // Garder seulement les dernières
           }
 
-          const averageMatrix = new THREE.Matrix4()
-          averageMatrix.compose(avgPosition, avgQuaternion, new THREE.Vector3(1, 1, 1))
+          // Calculer la moyenne des matrices récentes pour plus de stabilité
+          if (recentMatrices.length > 0) {
+            const positions: THREE.Vector3[] = []
+            const quaternions: THREE.Quaternion[] = []
 
-          // Appliquer un lissage simple en interpolant vers la nouvelle matrice
-          const lerpFactor = reticleSmoothingFactor
-          for (let i = 0; i < 16; i++) {
-            smoothedReticleMatrix.elements[i] = THREE.MathUtils.lerp(smoothedReticleMatrix.elements[i], averageMatrix.elements[i], lerpFactor)
-          }
+            recentMatrices.forEach(matrix => {
+              const pos = new THREE.Vector3()
+              const quat = new THREE.Quaternion()
+              const scl = new THREE.Vector3()
+              matrix.decompose(pos, quat, scl)
+              positions.push(pos)
+              quaternions.push(quat)
+            })
 
-          reticle.matrix.copy(smoothedReticleMatrix)
+            // Moyenner les positions
+            const avgPosition = positions.reduce((sum, pos) => sum.add(pos), new THREE.Vector3()).divideScalar(positions.length)
 
-          // Vérifier si la position est trop proche d'un tag existant et changer la couleur
-          const currentPosition = new THREE.Vector3()
-          currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
-          if (isPositionTooClose(currentPosition)) {
-            reticleMaterial.color.setHex(0xff0000) // Rouge si trop proche
-          } else {
-            reticleMaterial.color.setHex(0xffffff) // Blanc sinon
+            // Pour les quaternions, utiliser le premier comme base et slerp vers les autres
+            let avgQuaternion = quaternions[0].clone()
+            for (let i = 1; i < quaternions.length; i++) {
+              avgQuaternion.slerp(quaternions[i], 0.5)
+            }
+
+            const averageMatrix = new THREE.Matrix4()
+            averageMatrix.compose(avgPosition, avgQuaternion, new THREE.Vector3(1, 1, 1))
+
+            // Appliquer un lissage simple en interpolant vers la nouvelle matrice
+            const lerpFactor = reticleSmoothingFactor
+            for (let i = 0; i < 16; i++) {
+              smoothedReticleMatrix.elements[i] = THREE.MathUtils.lerp(smoothedReticleMatrix.elements[i], averageMatrix.elements[i], lerpFactor)
+            }
+
+            reticle.matrix.copy(smoothedReticleMatrix)
+
+            // Vérifier si la position est trop proche d'un tag existant et changer la couleur
+            const currentPosition = new THREE.Vector3()
+            currentPosition.setFromMatrixPosition(smoothedReticleMatrix)
+            if (isPositionTooClose(currentPosition)) {
+              reticleMaterial.color.setHex(0xff0000) // Rouge si trop proche
+            } else {
+              reticleMaterial.color.setHex(0xffffff) // Blanc sinon
+            }
           }
         }
       } else {
         reticle.visible = false
         // Réinitialiser les matrices récentes quand pas de hit-test
         recentMatrices = []
+      }
+    }
+
+    // Mettre à jour la position des tags basés sur les ancres XR (si disponibles)
+    for (const tag of tags) {
+      if (tag.anchor && localReferenceSpace) {
+        const anchorSpace = tag.anchor.anchorSpace || tag.anchor
+        const anchorPose = frame.getPose(anchorSpace, localReferenceSpace)
+        if (anchorPose) {
+          const anchorMatrix = new THREE.Matrix4().fromArray(anchorPose.transform.matrix)
+          tag.sprite.position.setFromMatrixPosition(anchorMatrix)
+        }
+      } else if (tag.baseMatrix) {
+        tag.sprite.position.setFromMatrixPosition(tag.baseMatrix)
       }
     }
   }
