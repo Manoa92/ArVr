@@ -10,10 +10,6 @@
           <input v-model="tagText" @keydown.enter.prevent="confirmTagText" placeholder="Entrez le nom..." autofocus />
         </div>
       </label>
-      <!-- <div class="tag-input-actions">
-        <button @click="confirmTagText">Valider</button>
-        <button @click="cancelTagText">Annuler</button>
-      </div> -->
     </div>
   </div>
 </template>
@@ -50,6 +46,28 @@ let reticleSmoothingFactor = 0.1 // Facteur de lissage (0.1 = lissage fort, 1.0 
 let recentMatrices: THREE.Matrix4[] = []
 const maxRecentMatrices = 5 // Nombre de matrices récentes à moyenner
 const minTagDistance = 0.1 // Distance minimale en mètres entre les tags
+
+const saveTags = () => {
+  const tagsData = tags.map(tag => ({
+    name: tag.sprite.userData.text || '',
+    position: tag.sprite.position,
+    baseMatrix: tag.baseMatrix?.elements
+  }))
+  sessionStorage.setItem('arTags', JSON.stringify(tagsData))
+}
+
+const loadTags = () => {
+  const stored = sessionStorage.getItem('arTags')
+  if (!stored) return []
+  
+  try {
+    const tagsData = JSON.parse(stored)
+    return tagsData
+  } catch (e) {
+    console.error('Failed to load tags from sessionStorage:', e)
+    return []
+  }
+}
 
 const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
   for (const tag of tags) {
@@ -128,6 +146,18 @@ const startAR = async () => {
   scene = new THREE.Scene()
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20)
 
+  // Charger les tags sauvegardés
+  const savedTagsData = loadTags()
+  for (const tagData of savedTagsData) {
+    const sprite = createTextSprite(tagData.name)
+    if (tagData.position) {
+      sprite.position.copy(tagData.position)
+    }
+    const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position)
+    scene.add(sprite)
+    tags.push({ sprite, baseMatrix })
+  }
+
   // Créer le reticle pour indiquer où placer le tag
   const reticleGeometry = new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2)
   reticleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff }) // Blanc par défaut
@@ -189,6 +219,7 @@ const createTextSprite = (text: string) => {
 
   const material = new THREE.SpriteMaterial({ map: texture, transparent: true })
   const sprite = new THREE.Sprite(material)
+  sprite.userData.text = text
 
   // Scale the sprite so it appears at a reasonable size in AR
   const scaleFactor = 0.001 // Réduit pour éviter les chevauchements visuels
@@ -227,6 +258,7 @@ const confirmTagText = () => {
     tag.position.setFromMatrixPosition(matrix)
     scene.add(tag)
     tags.push({ sprite: tag, anchor, baseMatrix: matrix.clone() })
+    saveTags()
   }
 
   const placeWithAnchor = async () => {
