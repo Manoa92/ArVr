@@ -143,7 +143,7 @@ onMounted(() => {
 <style scoped>
 .room-manager {
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #f8f9fa;
   padding: 20px;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
@@ -151,19 +151,19 @@ onMounted(() => {
 .header {
   text-align: center;
   margin-bottom: 40px;
-  color: white;
+  color: #333;
 }
 
 .header h1 {
   font-size: 2.5rem;
   margin-bottom: 10px;
   font-weight: 700;
-  text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  color: #2c3e50;
 }
 
 .header p {
   font-size: 1.1rem;
-  opacity: 0.9;
+  color: #6c757d;
   margin: 0;
 }
 
@@ -179,20 +179,21 @@ onMounted(() => {
   gap: 8px;
   width: 100%;
   padding: 15px 30px;
-  background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+  background: #007bff;
   color: white;
   border: none;
-  border-radius: 12px;
+  border-radius: 8px;
   font-size: 1.1rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.3s ease;
-  box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0,123,255,0.2);
 }
 
 .add-room-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4);
+  background: #0056b3;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0,123,255,0.3);
 }
 
 .btn-icon {
@@ -216,12 +217,11 @@ onMounted(() => {
 }
 
 .form-card {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  border-radius: 16px;
+  background: white;
+  border-radius: 12px;
   padding: 25px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  border: 1px solid #e9ecef;
 }
 
 .form-card h3 {
@@ -238,17 +238,17 @@ onMounted(() => {
 .room-input {
   width: 100%;
   padding: 12px 16px;
-  border: 2px solid #e1e5e9;
-  border-radius: 8px;
+  border: 2px solid #dee2e6;
+  border-radius: 6px;
   font-size: 1rem;
-  transition: all 0.3s ease;
+  transition: border-color 0.2s ease;
   box-sizing: border-box;
 }
 
 .room-input:focus {
   outline: none;
-  border-color: #667eea;
-  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+  border-color: #007bff;
+  box-shadow: 0 0 0 2px rgba(0,123,255,0.25);
 }
 
 .form-actions {
@@ -263,34 +263,32 @@ onMounted(() => {
   gap: 6px;
   padding: 10px 20px;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   font-size: 1rem;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
   flex: 1;
   justify-content: center;
 }
 
 .confirm-btn {
-  background: linear-gradient(45deg, #4ecdc4, #44a08d);
+  background: #28a745;
   color: white;
-  box-shadow: 0 4px 15px rgba(78, 205, 196, 0.3);
 }
 
 .confirm-btn:hover {
+  background: #218838;
   transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(78, 205, 196, 0.4);
 }
 
 .cancel-btn {
-  background: #f8f9fa;
-  color: #6c757d;
-  border: 1px solid #dee2e6;
+  background: #6c757d;
+  color: white;
 }
 
 .cancel-btn:hover {
-  background: #e9ecef;
+  background: #5a6268;
   transform: translateY(-1px);
 }
 
@@ -300,21 +298,19 @@ onMounted(() => {
 }
 
 .rooms-section h2 {
-  color: white;
+  color: #2c3e50;
   font-size: 1.8rem;
   margin-bottom: 25px;
   text-align: center;
-  text-shadow: 0 2px 4px rgba(0,0,0,0.3);
 }
 
 .empty-state {
   text-align: center;
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  border-radius: 16px;
+  background: white;
+  border-radius: 12px;
   padding: 40px 20px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  border: 1px solid #e9ecef;
   max-width: 500px;
   margin: 0 auto;
 }
@@ -322,6 +318,7 @@ onMounted(() => {
 .empty-icon {
   font-size: 4rem;
   margin-bottom: 20px;
+  opacity: 0.5;
 }
 
 .empty-state h3 {
@@ -331,7 +328,7 @@ onMounted(() => {
 }
 
 .empty-state p {
-  color: #666;
+  color: #6c757d;
   margin: 0;
   font-size: 1rem;
   line-height: 1.5;
@@ -344,30 +341,18 @@ onMounted(() => {
 }
 
 .room-card {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  border-radius: 16px;
+  background: white;
+  border-radius: 12px;
   padding: 25px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  transition: all 0.3s ease;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  border: 1px solid #e9ecef;
+  transition: all 0.2s ease;
   position: relative;
-  overflow: hidden;
-}
-
-.room-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 4px;
-  background: linear-gradient(90deg, #667eea, #764ba2);
 }
 
 .room-card:hover {
-  transform: translateY(-5px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }
 
 .room-header {
@@ -379,7 +364,7 @@ onMounted(() => {
 .room-icon {
   font-size: 2rem;
   margin-right: 15px;
-  background: linear-gradient(45deg, #667eea, #764ba2);
+  background: #007bff;
   border-radius: 50%;
   width: 50px;
   height: 50px;
@@ -409,34 +394,32 @@ onMounted(() => {
   gap: 8px;
   padding: 12px 16px;
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   font-size: 1rem;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
   flex: 1;
 }
 
 .select-btn {
-  background: linear-gradient(45deg, #667eea, #764ba2);
+  background: #007bff;
   color: white;
-  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
 }
 
 .select-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+  background: #0056b3;
+  transform: translateY(-1px);
 }
 
 .delete-btn {
-  background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+  background: #dc3545;
   color: white;
-  box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
 }
 
 .delete-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4);
+  background: #c82333;
+  transform: translateY(-1px);
 }
 
 @media (max-width: 768px) {

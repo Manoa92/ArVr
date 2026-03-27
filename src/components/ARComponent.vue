@@ -1,6 +1,6 @@
 <template>
   <div id="ar-container" ref="container"></div>
-  <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button>
+  <!-- <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button> -->
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
   <div  v-if="isInputVisible" class="tag-input-overlay">
     <div class="tag-input-box">
@@ -377,7 +377,9 @@ const render = (_timestamp: number, frame: any) => {
   renderer.render(scene, camera)
 }
 onMounted(() => {
+  setTimeout(() => {
   startAR();
+  }, 500);
 })
 </script>
 
