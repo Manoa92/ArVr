@@ -18,6 +18,10 @@
 import { ref, onMounted } from 'vue'
 import * as THREE from 'three'
 
+const props = defineProps<{
+  roomId: string
+}>()
+
 const container = ref<HTMLDivElement>()
 const isARStarted = ref(false)
 const isARSupported = ref<boolean | null>(null)
@@ -53,11 +57,11 @@ const saveTags = () => {
     position: tag.sprite.position,
     baseMatrix: tag.baseMatrix?.elements
   }))
-  sessionStorage.setItem('arTags', JSON.stringify(tagsData))
+  sessionStorage.setItem(`arTags_${props.roomId}`, JSON.stringify(tagsData))
 }
 
 const loadTags = () => {
-  const stored = sessionStorage.getItem('arTags')
+  const stored = sessionStorage.getItem(`arTags_${props.roomId}`)
   if (!stored) return []
   
   try {
