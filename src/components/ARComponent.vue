@@ -15,7 +15,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import * as THREE from 'three'
 
 const props = defineProps<{
@@ -83,6 +83,49 @@ const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
     }
   }
   return false
+}
+
+const reloadTagsForRoom = (roomId: string) => {
+  // Supprimer tous les tags actuels de la scène
+  for (const tag of tags) {
+    scene.remove(tag.sprite)
+    // Nettoyer les ancres si elles existent
+    if (tag.anchor && tag.anchor.delete) {
+      try {
+        tag.anchor.delete()
+      } catch {
+        // ignore
+      }
+    }
+  }
+  
+  // Vider le tableau des tags
+  tags = []
+  
+  // Charger les tags de la nouvelle pièce
+  const savedTagsData = loadTagsForRoom(roomId)
+  for (const tagData of savedTagsData) {
+    const sprite = createTextSprite(tagData.name)
+    if (tagData.position) {
+      sprite.position.copy(tagData.position)
+    }
+    const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position)
+    scene.add(sprite)
+    tags.push({ sprite, baseMatrix })
+  }
+}
+
+const loadTagsForRoom = (roomId: string) => {
+  const stored = sessionStorage.getItem(`arTags_${roomId}`)
+  if (!stored) return []
+  
+  try {
+    const tagsData = JSON.parse(stored)
+    return tagsData
+  } catch (e) {
+    console.error('Failed to load tags from sessionStorage:', e)
+    return []
+  }
 }
 
 onMounted(() => {
@@ -380,6 +423,13 @@ onMounted(() => {
   setTimeout(() => {
   startAR();
   }, 500);
+})
+
+// Watcher pour recharger les tags quand la pièce change
+watch(() => props.roomId, (newRoomId, oldRoomId) => {
+  if (newRoomId !== oldRoomId && isARStarted.value) {
+    reloadTagsForRoom(newRoomId)
+  }
 })
 </script>
 
