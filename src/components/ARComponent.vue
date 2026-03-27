@@ -376,6 +376,9 @@ const render = (_timestamp: number, frame: any) => {
 
   renderer.render(scene, camera)
 }
+onMounted(() => {
+  startAR();
+})
 </script>
 
 <style scoped>
