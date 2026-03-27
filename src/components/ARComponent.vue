@@ -1,6 +1,27 @@
 <template>
   <div id="ar-container" ref="container"></div>
-  <!-- <button class="btnStart" @click="startAR" v-if="!isARStarted">Démarrer AR</button> -->
+
+  <button class="panel-toggle btn-panel" @click="togglePanel">
+    {{ isPanelOpen ? 'Fermer la liste' : 'Liste des objets' }}
+  </button>
+
+  <aside :class="['objects-panel', { open: isPanelOpen }]" aria-label="Liste des objets AR">
+    <div class="panel-header">
+      <h3>Objets AR</h3>
+      <button class="close-panel" @click="togglePanel">✕</button>
+    </div>
+    <div v-if="objectsInScene.length === 0" class="empty-list">Aucun objet placé</div>
+    <ul>
+      <li v-for="(obj, index) in objectsInScene" :key="index">
+        <div class="object-info">
+          <strong>{{ obj.name }}</strong>
+          <small>({{ obj.position.x.toFixed(2) }}, {{ obj.position.y.toFixed(2) }}, {{ obj.position.z.toFixed(2) }})</small>
+        </div>
+        <button class="delete-object-btn" @click="removeTag(index)">Supprimer</button>
+      </li>
+    </ul>
+  </aside>
+
   <p v-if="isARSupported === false">Votre navigateur ne supporte pas WebXR AR.</p>
   <div  v-if="isInputVisible" class="tag-input-overlay">
     <div class="tag-input-box">
@@ -15,7 +36,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, computed } from 'vue'
 import * as THREE from 'three'
 
 const props = defineProps<{
@@ -27,6 +48,12 @@ const isARStarted = ref(false)
 const isARSupported = ref<boolean | null>(null)
 const isInputVisible = ref(false)
 const tagText = ref('')
+const isPanelOpen = ref(false)
+
+const objectsInScene = computed(() => tags.map(tag => ({
+  name: tag.sprite.userData.text || 'Sans nom',
+  position: tag.sprite.position.clone()
+})))
 
 interface TagObject {
   sprite: THREE.Sprite
@@ -83,6 +110,30 @@ const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
     }
   }
   return false
+}
+
+const togglePanel = () => {
+  isPanelOpen.value = !isPanelOpen.value
+}
+
+const removeTag = (index: number) => {
+  const tag = tags[index]
+  if (!tag) return
+
+  // Supprimer sprite de la scène
+  scene.remove(tag.sprite)
+
+  // Supprimer ancre si nécessaire
+  if (tag.anchor && tag.anchor.delete) {
+    try {
+      tag.anchor.delete()
+    } catch {
+      // ignore
+    }
+  }
+
+  tags.splice(index, 1)
+  saveTags()
 }
 
 const reloadTagsForRoom = (roomId: string) => {
@@ -434,6 +485,118 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
 </script>
 
 <style scoped>
+.objects-panel {
+  position: fixed;
+  top: 0;
+  right: -340px;
+  width: 320px;
+  height: 100vh;
+  background: rgba(255, 255, 255, 0.95);
+  border-left: 1px solid rgba(0,0,0,0.15);
+  box-shadow: -10px 0 30px rgba(0,0,0,0.25);
+  z-index: 999999;
+  padding: 16px;
+  transition: right 0.3s ease;
+  overflow-y: auto;
+}
+
+.objects-panel.open {
+  right: 0;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.1);
+  margin-bottom: 12px;
+}
+
+.panel-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.close-panel {
+  border: none;
+  background: transparent;
+  font-size: 1rem;
+  cursor: pointer;
+  background: rgba(0,0,0,0.08);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+
+.empty-list {
+  text-align: center;
+  color: #555;
+  padding-top: 20px;
+}
+
+.objects-panel ul {
+  list-style-type: none;
+  padding: 0;
+  margin: 0;
+}
+
+.objects-panel li {
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  font-size: 0.9rem;
+  color: #333;
+  background: #f8f9fa;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.object-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.objects-panel li strong {
+  font-size: 1rem;
+  margin-bottom: 4px;
+}
+
+.delete-object-btn {
+  border: none;
+  background: #dc3545;
+  color: white;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.delete-object-btn:hover {
+  background: #c82333;
+}
+
+.btn-panel {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 1000000;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.btn-panel:hover {
+  background: #0056b3;
+}
+
 .btnStart {
   padding: 12px 24px;
   font-size: 18px;
