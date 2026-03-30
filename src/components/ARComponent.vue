@@ -37,11 +37,18 @@
       </label>
     </div>
   </div>
+
+  <AlertComponent
+    :message="alertMessage"
+    :isVisible="isAlertVisible"
+    @close="closeAlert"
+  />
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import * as THREE from 'three'
+import AlertComponent from './AlertComponent.vue'
 
 const props = defineProps<{
   roomId: string
@@ -53,6 +60,8 @@ const isARSupported = ref<boolean | null>(null)
 const isInputVisible = ref(false)
 const tagText = ref('')
 const isPanelOpen = ref(false)
+const isAlertVisible = ref(false)
+const alertMessage = ref('')
 
 const objectsInScene = computed(() => tags.map(tag => ({
   name: tag.sprite.userData.text || 'Sans nom',
@@ -339,12 +348,12 @@ const onSelect = () => {
 
 const onAddTagBtnClick = () => {
   if (!isARStarted.value) {
-    alert('L’AR n’est pas encore démarré.')
+    showAlert('L\'AR n\'est pas encore démarré.')
     return
   }
 
   if (!reticle || !reticle.visible) {
-    alert('Aucune surface détectée actuellement. Veuillez attendre que le réticule apparaisse.')
+    showAlert('Aucune surface détectée actuellement. Veuillez attendre que le réticule apparaisse.')
     return
   }
 
@@ -366,7 +375,7 @@ const confirmTagText = () => {
 
   if (isPositionTooClose(newPosition)) {
     // Afficher un message d'erreur ou annuler
-    alert('Position trop proche d\'un tag existant. Veuillez choisir un autre emplacement.')
+    showAlert('Position trop proche d\'un tag existant. Veuillez choisir un autre emplacement.')
     cancelTagText()
     return
   }
@@ -401,6 +410,16 @@ const confirmTagText = () => {
 const cancelTagText = () => {
   isInputVisible.value = false
   tagText.value = ''
+}
+
+const showAlert = (message: string) => {
+  alertMessage.value = message
+  isAlertVisible.value = true
+}
+
+const closeAlert = () => {
+  isAlertVisible.value = false
+  alertMessage.value = ''
 }
 
 const render = (_timestamp: number, frame: any) => {
