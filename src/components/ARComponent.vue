@@ -5,6 +5,10 @@
     {{ isPanelOpen ? 'Fermer la liste' : 'Liste des objets' }}
   </button>
 
+  <button class="add-tag-btn btn-panel" @click="onAddTagBtnClick" :disabled="!isARStarted">
+    Ajouter un objet
+  </button>
+
   <aside :class="['objects-panel', { open: isPanelOpen }]" aria-label="Liste des objets AR">
     <div class="panel-header">
       <h3>Objets AR</h3>
@@ -333,6 +337,22 @@ const onSelect = () => {
   isInputVisible.value = true
 }
 
+const onAddTagBtnClick = () => {
+  if (!isARStarted.value) {
+    alert('L’AR n’est pas encore démarré.')
+    return
+  }
+
+  if (!reticle || !reticle.visible) {
+    alert('Aucune surface détectée actuellement. Veuillez attendre que le réticule apparaisse.')
+    return
+  }
+
+  pendingTagMatrix.copy(reticle.matrix)
+  tagText.value = ''
+  isInputVisible.value = true
+}
+
 const confirmTagText = () => {
   const text = tagText.value.trim()
   if (!text) {
@@ -516,6 +536,24 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
 .panel-header h3 {
   margin: 0;
   font-size: 1.1rem;
+}
+
+.add-tag-btn {
+  position: fixed;
+  top: 70px;
+  left: 16px;
+  z-index: 999999;
+  background: #007bff;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.add-tag-btn:disabled {
+  background: #6c757d;
+  cursor: not-allowed;
 }
 
 .close-panel {
