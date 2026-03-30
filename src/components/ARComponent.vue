@@ -540,7 +540,7 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
 
 .add-tag-btn {
   position: fixed;
-  top: 70px;
+  bottom: 70px;
   left: 16px;
   z-index: 999999;
   background: #007bff;
