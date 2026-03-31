@@ -5,7 +5,7 @@
     {{ isPanelOpen ? 'Fermer la liste' : 'Liste des objets' }}
   </button>
 
-  <button class=" btn-panel add-tag-btn" @click="onAddTagBtnClick" :disabled="!isARStarted">
+  <button class="btn-panel add-tag-btn" @click="onAddTagBtnClick" :disabled="!isARStarted">
     Ajouter un objet
   </button>
 
@@ -46,7 +46,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, watch, computed, onBeforeUnmount } from 'vue'
 import * as THREE from 'three'
 import AlertComponent from './AlertComponent.vue'
 
@@ -63,6 +63,7 @@ const isPanelOpen = ref(false)
 const isAlertVisible = ref(false)
 const alertMessage = ref('')
 const tags = ref<TagObject[]>([])
+let isARStarting = false  // Flag pour éviter les appels multiples à startAR()
 
 const objectsInScene = computed(() => tags.value.map(tag => ({
   name: tag.sprite.userData.text || 'Sans nom',
@@ -162,6 +163,9 @@ const removeTag = (index: number) => {
 }
 
 const reloadTagsForRoom = (roomId: string) => {
+  // S'assurer que la scène existe avant de faire quoi que ce soit
+  if (!scene) return
+  
   // Supprimer tous les tags actuels de la scène et disposer les ressources
   for (const tag of tags.value) {
     // Disposer les ressources WebGL
@@ -229,6 +233,9 @@ const checkARSupport = async () => {
 
 const startAR = async () => {
   if (!isARSupported.value) return
+  if (isARStarted.value || isARStarting) return  // Éviter d'appeler startAR() plusieurs fois
+  
+  isARStarting = true
 
   const session = await (navigator as any).xr.requestSession('immersive-ar', {
     requiredFeatures: ['hit-test'],
@@ -247,6 +254,7 @@ const startAR = async () => {
   const endARSession = () => {
     renderer.setAnimationLoop(null)
     isARStarted.value = false
+    isARStarting = false
     isInputVisible.value = false
 
     if (hitTestSource?.cancel) hitTestSource.cancel()
@@ -278,7 +286,7 @@ const startAR = async () => {
     }
     tags.value = []
 
-    // Optionally clean up WebGL resources
+    // Clean up WebGL resources
     renderer.dispose()
   }
 
@@ -328,6 +336,7 @@ const startAR = async () => {
 
   renderer.setAnimationLoop(render)
   isARStarted.value = true
+  isARStarting = false
 }
 
 const createTextSprite = (text: string) => {
@@ -539,16 +548,94 @@ const render = (_timestamp: number, frame: any) => {
 
   renderer.render(scene, camera)
 }
+
+const cleanupAR = () => {
+  // Arrêter la boucle de rendu
+  if (renderer) {
+    renderer.setAnimationLoop(null)
+  }
+
+  // Réinitialiser les ressources XR
+  if (hitTestSource?.cancel) {
+    try {
+      hitTestSource.cancel()
+    } catch {
+      // ignore
+    }
+  }
+  hitTestSource = null
+  localReferenceSpace = null
+
+  // Nettoyer les tags
+  for (const tag of tags.value) {
+    // Disposer les ressources WebGL
+    if (tag.sprite.material instanceof THREE.SpriteMaterial) {
+      if (tag.sprite.material.map) {
+        tag.sprite.material.map.dispose()
+      }
+      tag.sprite.material.dispose()
+    }
+    
+    if (tag.anchor && tag.anchor.delete) {
+      try {
+        tag.anchor.delete()
+      } catch {
+        // ignore
+      }
+    }
+    if (scene) {
+      scene.remove(tag.sprite)
+    }
+  }
+  tags.value = []
+
+  // Nettoyer le renderer et le canvas
+  if (renderer && container.value?.contains(renderer.domElement)) {
+    container.value.removeChild(renderer.domElement)
+  }
+  
+  if (renderer) {
+    renderer.dispose()
+  }
+
+  isARStarted.value = false
+  isARStarting = false
+  isInputVisible.value = false
+}
+
 onMounted(() => {
   setTimeout(() => {
   startAR();
   }, 500);
 })
 
+onBeforeUnmount(() => {
+  cleanupAR()
+})
+
+// Fonction pour démarrer AR de manière sécurisée
+const ensureARStarted = async () => {
+  if (isARStarted.value || isARStarting) return
+  if (!isARSupported.value) return
+  
+  try {
+    await startAR()
+  } catch (err) {
+    console.error('Failed to start AR:', err)
+    isARStarting = false
+  }
+}
+
 // Watcher pour recharger les tags quand la pièce change
-watch(() => props.roomId, (newRoomId, oldRoomId) => {
-  if (newRoomId !== oldRoomId && isARStarted.value) {
-    reloadTagsForRoom(newRoomId)
+watch(() => props.roomId, async (newRoomId, oldRoomId) => {
+  if (newRoomId !== oldRoomId) {
+    // Si AR est démarré, recharger les tags pour la nouvelle pièce
+    if (isARStarted.value) {
+      reloadTagsForRoom(newRoomId)
+    } else {
+      // Si AR n'est pas démarré, le démarrer
+      await ensureARStarted()
+    }
   }
 })
 </script>
