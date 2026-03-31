@@ -1,6 +1,14 @@
 <template>
   <div id="ar-container" ref="container"></div>
 
+  <!-- Écran de chargement -->
+  <div v-if="isLoading" class="loading-screen">
+    <div class="loading-content">
+      <div class="spinner"></div>
+      <p>Chargement de la pièce...</p>
+    </div>
+  </div>
+
   <button class="panel-toggle btn-panel" @click="togglePanel">
     {{ isPanelOpen ? 'Fermer la liste' : 'Liste des objets' }}
   </button>
@@ -63,6 +71,7 @@ const isPanelOpen = ref(false)
 const isAlertVisible = ref(false)
 const alertMessage = ref('')
 const tags = ref<TagObject[]>([])
+const isLoading = ref(false)  // État de chargement
 let isARStarting = false  // Flag pour éviter les appels multiples à startAR()
 let isCheckingARSupport = false  // Flag pour tracker si checkARSupport() est en cours
 
@@ -264,6 +273,7 @@ const startAR = async () => {
     isARStarted.value = false
     isARStarting = false
     isInputVisible.value = false
+    isLoading.value = false
 
     if (hitTestSource?.cancel) hitTestSource.cancel()
     hitTestSource = null
@@ -616,10 +626,17 @@ const cleanupAR = () => {
 }
 
 onMounted(async () => {
-  await checkARSupport()
-  setTimeout(() => {
-    startAR()
-  }, 500)
+  isLoading.value = true
+  try {
+    await checkARSupport()
+    setTimeout(() => {
+      startAR()
+    }, 500)
+  } finally {
+    setTimeout(() => {
+      isLoading.value = false
+    }, 500)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -645,23 +662,74 @@ watch(() => props.roomId, async (newRoomId, oldRoomId) => {
   if (!oldRoomId) return
   
   if (newRoomId !== oldRoomId) {
-    // Attendre que AR soit prêt avant de faire quoi que ce soit
-    while (isCheckingARSupport || isARStarting) {
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
+    isLoading.value = true
     
-    // Si AR est démarré, recharger les tags pour la nouvelle pièce
-    if (isARStarted.value) {
-      reloadTagsForRoom(newRoomId)
-    } else {
-      // Si AR n'est pas démarré, le démarrer
-      await ensureARStarted()
+    try {
+      // Attendre que AR soit prêt avant de faire quoi que ce soit
+      while (isCheckingARSupport || isARStarting) {
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      
+      // Si AR est démarré, recharger les tags pour la nouvelle pièce
+      if (isARStarted.value) {
+        reloadTagsForRoom(newRoomId)
+      } else {
+        // Si AR n'est pas démarré, le démarrer
+        await ensureARStarted()
+      }
+    } finally {
+      isLoading.value = false
     }
   }
 }, { immediate: false })
 </script>
 
 <style scoped>
+.loading-screen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000000;
+}
+
+.loading-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+.spinner {
+  width: 60px;
+  height: 60px;
+  border: 4px solid rgba(255, 255, 255, 0.3);
+  border-top: 4px solid #007bff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-content p {
+  color: white;
+  font-size: 1.1rem;
+  font-weight: 500;
+  margin: 0;
+}
+
 .objects-panel {
   position: fixed;
   top: 0;
