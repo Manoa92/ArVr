@@ -557,25 +557,6 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
   font-size: 1.1rem;
 }
 
-.add-tag-btn {
-  position: fixed;
-  bottom: 70px!important;
-  left: 16px;
-  height: 48px;
-  z-index: 999999;
-  background: #007bff;
-  color: #fff;
-  border: none;
-  border-radius: 5px;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-
-.add-tag-btn:disabled {
-  background: #6c757d;
-  cursor: not-allowed;
-}
-
 .close-panel {
   border: none;
   background: transparent;
@@ -665,6 +646,25 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
   cursor: pointer;
   margin: 20px;
   z-index: 999999;
+}
+
+.add-tag-btn {
+  position: fixed;
+  bottom: 70px!important;
+  left: 16px;
+  height: 48px;
+  z-index: 999999;
+  background: #007bff;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.add-tag-btn:disabled {
+  background: #6c757d;
+  cursor: not-allowed;
 }
 
 #ar-container {
