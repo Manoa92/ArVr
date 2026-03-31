@@ -603,10 +603,11 @@ const cleanupAR = () => {
   isInputVisible.value = false
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await checkARSupport()
   setTimeout(() => {
-  startAR();
-  }, 500);
+    startAR()
+  }, 500)
 })
 
 onBeforeUnmount(() => {
@@ -628,6 +629,9 @@ const ensureARStarted = async () => {
 
 // Watcher pour recharger les tags quand la pièce change
 watch(() => props.roomId, async (newRoomId, oldRoomId) => {
+  // Ignorer le premier appel (lors du montage initial)
+  if (!oldRoomId) return
+  
   if (newRoomId !== oldRoomId) {
     // Si AR est démarré, recharger les tags pour la nouvelle pièce
     if (isARStarted.value) {
@@ -637,7 +641,7 @@ watch(() => props.roomId, async (newRoomId, oldRoomId) => {
       await ensureARStarted()
     }
   }
-})
+}, { immediate: false })
 </script>
 
 <style scoped>
