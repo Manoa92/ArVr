@@ -64,6 +64,7 @@ const isAlertVisible = ref(false)
 const alertMessage = ref('')
 const tags = ref<TagObject[]>([])
 let isARStarting = false  // Flag pour éviter les appels multiples à startAR()
+let isCheckingARSupport = false  // Flag pour tracker si checkARSupport() est en cours
 
 const objectsInScene = computed(() => tags.value.map(tag => ({
   name: tag.sprite.userData.text || 'Sans nom',
@@ -223,11 +224,18 @@ onMounted(() => {
 })
 
 const checkARSupport = async () => {
-  if ('xr' in navigator) {
-    const supported = await (navigator as any).xr.isSessionSupported('immersive-ar')
-    isARSupported.value = supported
-  } else {
-    isARSupported.value = false
+  if (isCheckingARSupport) return  // Éviter les appels multiples
+  isCheckingARSupport = true
+  
+  try {
+    if ('xr' in navigator) {
+      const supported = await (navigator as any).xr.isSessionSupported('immersive-ar')
+      isARSupported.value = supported
+    } else {
+      isARSupported.value = false
+    }
+  } finally {
+    isCheckingARSupport = false
   }
 }
 
@@ -550,6 +558,10 @@ const render = (_timestamp: number, frame: any) => {
 }
 
 const cleanupAR = () => {
+  // Arrêter les opérations en cours
+  isCheckingARSupport = false
+  isARStarting = false
+  
   // Arrêter la boucle de rendu
   if (renderer) {
     renderer.setAnimationLoop(null)
@@ -633,6 +645,11 @@ watch(() => props.roomId, async (newRoomId, oldRoomId) => {
   if (!oldRoomId) return
   
   if (newRoomId !== oldRoomId) {
+    // Attendre que AR soit prêt avant de faire quoi que ce soit
+    while (isCheckingARSupport || isARStarting) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    
     // Si AR est démarré, recharger les tags pour la nouvelle pièce
     if (isARStarted.value) {
       reloadTagsForRoom(newRoomId)
