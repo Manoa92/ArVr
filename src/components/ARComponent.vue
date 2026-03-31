@@ -5,7 +5,7 @@
     {{ isPanelOpen ? 'Fermer la liste' : 'Liste des objets' }}
   </button>
 
-  <button class="add-tag-btn btn-panel" @click="onAddTagBtnClick" :disabled="!isARStarted">
+  <button class=" btn-panel add-tag-btn" @click="onAddTagBtnClick" :disabled="!isARStarted">
     Ajouter un objet
   </button>
 
