@@ -561,6 +561,7 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
   position: fixed;
   bottom: 70px;
   left: 16px;
+  height: 48px;
   z-index: 999999;
   background: #007bff;
   color: #fff;
