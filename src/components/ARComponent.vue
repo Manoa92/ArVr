@@ -629,13 +629,15 @@ onMounted(async () => {
   isLoading.value = true
   try {
     await checkARSupport()
-    setTimeout(() => {
-      startAR()
-    }, 500)
+    // Attendre que startAR soit complètement terminée avant de masquer le loading
+    await new Promise<void>(resolve => {
+      setTimeout(async () => {
+        await startAR()
+        resolve()
+      }, 500)
+    })
   } finally {
-    setTimeout(() => {
-      isLoading.value = false
-    }, 500)
+    isLoading.value = false
   }
 })
 
