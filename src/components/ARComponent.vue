@@ -62,8 +62,9 @@ const tagText = ref('')
 const isPanelOpen = ref(false)
 const isAlertVisible = ref(false)
 const alertMessage = ref('')
+const tags = ref<TagObject[]>([])
 
-const objectsInScene = computed(() => tags.map(tag => ({
+const objectsInScene = computed(() => tags.value.map(tag => ({
   name: tag.sprite.userData.text || 'Sans nom',
   position: tag.sprite.position.clone()
 })))
@@ -83,7 +84,6 @@ let reticleMaterial: THREE.MeshBasicMaterial
 let hitTestSource: any = null
 let localReferenceSpace: any = null
 let lastHitTestResult: any = null
-let tags: TagObject[] = []
 let pendingTagMatrix = new THREE.Matrix4()
 let smoothedReticleMatrix = new THREE.Matrix4()
 let reticleSmoothingFactor = 0.1 // Facteur de lissage (0.1 = lissage fort, 1.0 = pas de lissage)
@@ -92,7 +92,7 @@ const maxRecentMatrices = 5 // Nombre de matrices récentes à moyenner
 const minTagDistance = 0.1 // Distance minimale en mètres entre les tags
 
 const saveTags = () => {
-  const tagsData = tags.map(tag => ({
+  const tagsData = tags.value.map(tag => ({
     name: tag.sprite.userData.text || '',
     position: {
       x: tag.sprite.position.x,
@@ -118,7 +118,7 @@ const loadTags = () => {
 }
 
 const isPositionTooClose = (newPosition: THREE.Vector3): boolean => {
-  for (const tag of tags) {
+  for (const tag of tags.value) {
     const pos = new THREE.Vector3()
     pos.setFromMatrixPosition(tag.sprite.matrixWorld)
     const distance = pos.distanceTo(newPosition)
@@ -134,7 +134,7 @@ const togglePanel = () => {
 }
 
 const removeTag = (index: number) => {
-  const tag = tags[index]
+  const tag = tags.value[index]
   if (!tag) return
 
   // Supprimer sprite de la scène
@@ -149,13 +149,13 @@ const removeTag = (index: number) => {
     }
   }
 
-  tags.splice(index, 1)
+  tags.value.splice(index, 1)
   saveTags()
 }
 
 const reloadTagsForRoom = (roomId: string) => {
   // Supprimer tous les tags actuels de la scène
-  for (const tag of tags) {
+  for (const tag of tags.value) {
     scene.remove(tag.sprite)
     // Nettoyer les ancres si elles existent
     if (tag.anchor && tag.anchor.delete) {
@@ -168,7 +168,7 @@ const reloadTagsForRoom = (roomId: string) => {
   }
   
   // Vider le tableau des tags
-  tags = []
+  tags.value = []
   
   // Charger les tags de la nouvelle pièce
   const savedTagsData = loadTagsForRoom(roomId)
@@ -179,7 +179,7 @@ const reloadTagsForRoom = (roomId: string) => {
     }
     const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position?.x || 0, tagData.position?.y || 0, tagData.position?.z || 0)
     scene.add(sprite)
-    tags.push({ sprite, baseMatrix })
+    tags.value.push({ sprite, baseMatrix })
   }
 }
 
@@ -240,7 +240,7 @@ const startAR = async () => {
     }
 
     // Nettoyer les ancres et tags
-    for (const tag of tags) {
+    for (const tag of tags.value) {
       if (tag.anchor && tag.anchor.delete) {
         try {
           tag.anchor.delete()
@@ -250,7 +250,7 @@ const startAR = async () => {
       }
       scene.remove(tag.sprite)
     }
-    tags = []
+    tags.value = []
 
     // Optionally clean up WebGL resources
     renderer.dispose()
@@ -270,7 +270,7 @@ const startAR = async () => {
     }
     const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position?.x || 0, tagData.position?.y || 0, tagData.position?.z || 0)
     scene.add(sprite)
-    tags.push({ sprite, baseMatrix })
+    tags.value.push({ sprite, baseMatrix })
   }
 
   // Créer le reticle pour indiquer où placer le tag
@@ -388,7 +388,7 @@ const confirmTagText = () => {
     const tag = createTextSprite(text)
     tag.position.setFromMatrixPosition(matrix)
     scene.add(tag)
-    tags.push({ sprite: tag, anchor, baseMatrix: matrix.clone() })
+    tags.value.push({ sprite: tag, anchor, baseMatrix: matrix.clone() })
     saveTags()
   }
 
@@ -497,7 +497,7 @@ const render = (_timestamp: number, frame: any) => {
     }
 
     // Mettre à jour la position des tags basés sur les ancres XR (si disponibles)
-    for (const tag of tags) {
+    for (const tag of tags.value) {
       if (tag.anchor && localReferenceSpace) {
         const anchorSpace = tag.anchor.anchorSpace || tag.anchor
         const anchorPose = frame.getPose(anchorSpace, localReferenceSpace)
