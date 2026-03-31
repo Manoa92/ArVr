@@ -94,21 +94,25 @@ const minTagDistance = 0.1 // Distance minimale en mètres entre les tags
 const saveTags = () => {
   const tagsData = tags.map(tag => ({
     name: tag.sprite.userData.text || '',
-    position: tag.sprite.position,
-    baseMatrix: tag.baseMatrix?.elements
+    position: {
+      x: tag.sprite.position.x,
+      y: tag.sprite.position.y,
+      z: tag.sprite.position.z
+    },
+    baseMatrix: tag.baseMatrix?.elements ? Array.from(tag.baseMatrix.elements) : null
   }))
-  sessionStorage.setItem(`arTags_${props.roomId}`, JSON.stringify(tagsData))
+  localStorage.setItem(`arTags_${props.roomId}`, JSON.stringify(tagsData))
 }
 
 const loadTags = () => {
-  const stored = sessionStorage.getItem(`arTags_${props.roomId}`)
+  const stored = localStorage.getItem(`arTags_${props.roomId}`)
   if (!stored) return []
   
   try {
     const tagsData = JSON.parse(stored)
     return tagsData
   } catch (e) {
-    console.error('Failed to load tags from sessionStorage:', e)
+    console.error('Failed to load tags from localStorage:', e)
     return []
   }
 }
@@ -171,23 +175,23 @@ const reloadTagsForRoom = (roomId: string) => {
   for (const tagData of savedTagsData) {
     const sprite = createTextSprite(tagData.name)
     if (tagData.position) {
-      sprite.position.copy(tagData.position)
+      sprite.position.set(tagData.position.x, tagData.position.y, tagData.position.z)
     }
-    const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position)
+    const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position?.x || 0, tagData.position?.y || 0, tagData.position?.z || 0)
     scene.add(sprite)
     tags.push({ sprite, baseMatrix })
   }
 }
 
 const loadTagsForRoom = (roomId: string) => {
-  const stored = sessionStorage.getItem(`arTags_${roomId}`)
+  const stored = localStorage.getItem(`arTags_${roomId}`)
   if (!stored) return []
   
   try {
     const tagsData = JSON.parse(stored)
     return tagsData
   } catch (e) {
-    console.error('Failed to load tags from sessionStorage:', e)
+    console.error('Failed to load tags from localStorage:', e)
     return []
   }
 }
@@ -262,9 +266,9 @@ const startAR = async () => {
   for (const tagData of savedTagsData) {
     const sprite = createTextSprite(tagData.name)
     if (tagData.position) {
-      sprite.position.copy(tagData.position)
+      sprite.position.set(tagData.position.x, tagData.position.y, tagData.position.z)
     }
-    const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position)
+    const baseMatrix = tagData.baseMatrix ? new THREE.Matrix4().fromArray(tagData.baseMatrix) : new THREE.Matrix4().setPosition(tagData.position?.x || 0, tagData.position?.y || 0, tagData.position?.z || 0)
     scene.add(sprite)
     tags.push({ sprite, baseMatrix })
   }

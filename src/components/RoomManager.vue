@@ -86,11 +86,11 @@ const emit = defineEmits<{
 }>()
 
 const saveRooms = () => {
-  sessionStorage.setItem('rooms', JSON.stringify(rooms.value))
+  localStorage.setItem('rooms', JSON.stringify(rooms.value))
 }
 
 const loadRooms = () => {
-  const stored = sessionStorage.getItem('rooms')
+  const stored = localStorage.getItem('rooms')
   if (stored) {
     try {
       rooms.value = JSON.parse(stored)
@@ -132,7 +132,7 @@ const deleteRoom = (roomId: string) => {
   rooms.value = rooms.value.filter(r => r.id !== roomId)
   saveRooms()
   // Optionally, remove associated tags
-  sessionStorage.removeItem(`arTags_${roomId}`)
+  localStorage.removeItem(`arTags_${roomId}`)
 }
 
 onMounted(() => {
