@@ -137,6 +137,14 @@ const removeTag = (index: number) => {
   const tag = tags.value[index]
   if (!tag) return
 
+  // Disposer les ressources WebGL
+  if (tag.sprite.material instanceof THREE.SpriteMaterial) {
+    if (tag.sprite.material.map) {
+      tag.sprite.material.map.dispose()
+    }
+    tag.sprite.material.dispose()
+  }
+
   // Supprimer sprite de la scène
   scene.remove(tag.sprite)
 
@@ -154,9 +162,19 @@ const removeTag = (index: number) => {
 }
 
 const reloadTagsForRoom = (roomId: string) => {
-  // Supprimer tous les tags actuels de la scène
+  // Supprimer tous les tags actuels de la scène et disposer les ressources
   for (const tag of tags.value) {
+    // Disposer les ressources WebGL
+    if (tag.sprite.material instanceof THREE.SpriteMaterial) {
+      if (tag.sprite.material.map) {
+        tag.sprite.material.map.dispose()
+      }
+      tag.sprite.material.dispose()
+    }
+    
+    // Retirer de la scène
     scene.remove(tag.sprite)
+    
     // Nettoyer les ancres si elles existent
     if (tag.anchor && tag.anchor.delete) {
       try {
@@ -241,6 +259,14 @@ const startAR = async () => {
 
     // Nettoyer les ancres et tags
     for (const tag of tags.value) {
+      // Disposer les ressources WebGL
+      if (tag.sprite.material instanceof THREE.SpriteMaterial) {
+        if (tag.sprite.material.map) {
+          tag.sprite.material.map.dispose()
+        }
+        tag.sprite.material.dispose()
+      }
+      
       if (tag.anchor && tag.anchor.delete) {
         try {
           tag.anchor.delete()
