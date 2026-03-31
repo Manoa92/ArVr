@@ -620,7 +620,6 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
 
 .btn-panel {
   position: fixed;
-  top: 12px;
   right: 12px;
   z-index: 1000000;
   background: #007bff;
@@ -665,6 +664,10 @@ watch(() => props.roomId, (newRoomId, oldRoomId) => {
 .add-tag-btn:disabled {
   background: #6c757d;
   cursor: not-allowed;
+}
+
+.panel-toggle {
+  top: 12px;
 }
 
 #ar-container {
