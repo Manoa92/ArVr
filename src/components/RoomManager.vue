@@ -55,7 +55,7 @@
           <div class="room-actions">
             <button @click="selectRoom(room.id)" class="select-btn">
               <span class="btn-icon">🎯</span>
-              Explorer en AR
+              AR
             </button>
             <button @click="deleteRoom(room.id)" class="delete-btn">
               <span class="btn-icon">🗑️</span>
