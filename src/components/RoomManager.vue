@@ -57,6 +57,10 @@
               <span class="btn-icon">🎯</span>
               AR
             </button>
+            <button @click="startScan(room.id)" class="scan-btn">
+              <span class="btn-icon">📐</span>
+              Scan 3D
+            </button>
             <button @click="deleteRoom(room.id)" class="delete-btn">
               <span class="btn-icon">🗑️</span>
               Supprimer
@@ -83,6 +87,7 @@ const roomInput = ref<HTMLInputElement>()
 
 const emit = defineEmits<{
   selectRoom: [roomId: string]
+  startScanRoom: [roomId: string]
 }>()
 
 const saveRooms = () => {
@@ -126,6 +131,10 @@ const cancelAddRoom = () => {
 
 const selectRoom = (roomId: string) => {
   emit('selectRoom', roomId)
+}
+
+const startScan = (roomId: string) => {
+  emit('startScanRoom', roomId)
 }
 
 const deleteRoom = (roomId: string) => {
@@ -419,6 +428,16 @@ onMounted(() => {
 
 .delete-btn:hover {
   background: #c82333;
+  transform: translateY(-1px);
+}
+
+.scan-btn {
+  background: #0d6efd;
+  color: white;
+}
+
+.scan-btn:hover {
+  background: #0b5ed7;
   transform: translateY(-1px);
 }
 

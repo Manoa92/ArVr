@@ -2,13 +2,19 @@
 import { ref } from 'vue'
 import RoomManager from './components/RoomManager.vue'
 import ARComponent from './components/ARComponent.vue'
+import RoomCapture from './components/RoomCapture.vue'
 
-const currentView = ref<'rooms' | 'ar'>('rooms')
+const currentView = ref<'rooms' | 'ar' | 'capture'>('rooms')
 const selectedRoomId = ref<string | null>(null)
 
 const onSelectRoom = (roomId: string) => {
   selectedRoomId.value = roomId
   currentView.value = 'ar'
+}
+
+const onStartScan = (roomId: string) => {
+  selectedRoomId.value = roomId
+  currentView.value = 'capture'
 }
 
 const backToRooms = () => {
@@ -19,11 +25,14 @@ const backToRooms = () => {
 
 <template>
   <div v-if="currentView === 'rooms'">
-    <RoomManager @selectRoom="onSelectRoom" />
+    <RoomManager @selectRoom="onSelectRoom" @startScanRoom="onStartScan" />
   </div>
   <div v-else-if="currentView === 'ar' && selectedRoomId">
     <button @click="backToRooms" class="back-btn">Retour aux Pièces</button>
     <ARComponent :roomId="selectedRoomId" />
+  </div>
+  <div v-else-if="currentView === 'capture' && selectedRoomId">
+    <RoomCapture :roomId="selectedRoomId" @back="backToRooms" />
   </div>
 </template>
 
