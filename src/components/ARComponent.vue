@@ -254,11 +254,25 @@ const startAR = async () => {
   
   isARStarting = true
 
-  const session = await (navigator as any).xr.requestSession('immersive-ar', {
+  // Timeout pour éviter le blocage infini
+  const sessionPromise = (navigator as any).xr.requestSession('immersive-ar', {
     requiredFeatures: ['hit-test'],
     optionalFeatures: ['dom-overlay'],
     domOverlay: { root: document.body }
   })
+
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('AR session request timed out')), 10000) // 10 secondes timeout
+  })
+
+  let session
+  try {
+    session = await Promise.race([sessionPromise, timeoutPromise])
+  } catch (error) {
+    console.error('Failed to request AR session:', error)
+    isARStarting = false
+    throw error
+  }
 
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
   renderer.setSize(window.innerWidth, window.innerHeight)
@@ -679,6 +693,9 @@ watch(() => props.roomId, async (newRoomId, oldRoomId) => {
         // Si AR n'est pas démarré, le démarrer
         await ensureARStarted()
       }
+    } catch (error) {
+      console.error('Erreur lors du changement de pièce:', error)
+      showAlert('Erreur lors du chargement de la pièce. Veuillez réessayer.')
     } finally {
       isLoading.value = false
     }
