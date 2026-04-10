@@ -57,18 +57,29 @@
       </div>
     </div>
 
-    <div v-if="isLoading" class="loading-overlay">
-      <div class="loading-box">
-        <div class="spinner"></div>
-        <p>Préparation du scan...</p>
+    <div v-if="isScanning" class="scan-overlay">
+      <div class="scan-info">
+        <div class="scan-counter">
+          <div class="counter-number">{{ positions.length }}</div>
+          <div class="counter-label">Points capturés</div>
+        </div>
+        <div class="scan-instructions">
+          <p>🔄 Tournez lentement autour de la pièce</p>
+          <p>📍 Pointez vers les murs, sols et plafonds</p>
+          <p>⚡ Les points s'ajoutent automatiquement</p>
+        </div>
+        <div class="scan-progress">
+          <div class="progress-bar">
+            <div class="progress-fill" :style="{ width: scanProgress + '%' }"></div>
+          </div>
+          <p class="progress-text">{{ scanProgressText }}</p>
+        </div>
       </div>
     </div>
 
-    <div v-if="isARSupported === false" class="unsupported-message">
-      <p>Votre navigateur ne supporte pas WebXR AR. Essayez depuis un mobile compatible ou un appareil disposant de la réalité augmentée.</p>
+    <div v-if="isScanning && lastPointCaptured" class="point-captured-feedback">
+      <span class="point-indicator">✨ Point capturé!</span>
     </div>
-
-    <div ref="container" class="ar-overlay"></div>
 
     <AlertComponent
       :message="alertMessage"
@@ -93,6 +104,7 @@ const emit = defineEmits<{
 
 const container = ref<HTMLDivElement>()
 const previewContainer = ref<HTMLDivElement>()
+
 const isScanning = ref(false)
 const isLoading = ref(false)
 const isARSupported = ref<boolean | null>(null)
@@ -100,6 +112,9 @@ const scanMessage = ref('Appuyez sur « Démarrer le scan » et faites un tour �
 const positions = ref<THREE.Vector3[]>([])
 const isAlertVisible = ref(false)
 const alertMessage = ref('')
+const lastPointCaptured = ref(false)
+const scanProgress = ref(0)
+const scanProgressText = ref('');
 
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
@@ -242,8 +257,51 @@ const addScanPoint = (position: THREE.Vector3) => {
   const tooClose = positions.value.some((point) => point.distanceTo(position) < scanDistanceThreshold)
   if (!tooClose) {
     positions.value.push(position.clone())
-    scanMessage.value = `Points capturés : ${positions.value.length}. Continuez à tourner en 360°.`
+
+    // Feedback visuel pour le point capturé
+    lastPointCaptured.value = true
+    setTimeout(() => {
+      lastPointCaptured.value = false
+    }, 1000)
+
+    updateScanProgress()
+    scanMessage.value = `Points capturés : ${positions.value.length}. ${scanProgressText.value}`
     updatePreview()
+  }
+}
+
+const updateScanProgress = () => {
+  const pointCount = positions.value.length
+
+  // Progression basée sur le nombre de points (minimum 20 points pour un scan décent)
+  const optimalPoints = 50
+  let progress = Math.min((pointCount / optimalPoints) * 100, 100)
+
+  // Bonus pour la couverture spatiale (si les points sont bien répartis)
+  if (pointCount >= 8) {
+    const box = new THREE.Box3().setFromPoints(positions.value)
+    const size = box.getSize(new THREE.Vector3())
+    const volume = size.x * size.y * size.z
+
+    // Plus le volume est grand, meilleure est la couverture
+    if (volume > 1) { // Volume minimum pour une pièce
+      const coverageBonus = Math.min(volume * 10, 20) // Bonus max de 20%
+      progress = Math.min(progress + coverageBonus, 100)
+    }
+  }
+
+  scanProgress.value = Math.round(progress)
+
+  if (pointCount < 5) {
+    scanProgressText.value = 'Continuez à scanner - besoin de plus de points'
+  } else if (pointCount < 15) {
+    scanProgressText.value = 'Bon début ! Continuez à tourner'
+  } else if (pointCount < 30) {
+    scanProgressText.value = 'Bien ! Couvrez tous les angles'
+  } else if (pointCount < 50) {
+    scanProgressText.value = 'Excellent ! Presque terminé'
+  } else {
+    scanProgressText.value = 'Scan complet ! Vous pouvez arrêter'
   }
 }
 
@@ -309,6 +367,7 @@ const startScan = async () => {
     renderer.setAnimationLoop(renderFrame)
     isScanning.value = true
     scanMessage.value = 'Scan en cours. Faites un tour complet de la pièce en observant les murs et les sols.'
+    updateScanProgress()
   } catch (error) {
     console.error(error)
     showAlert('Impossible de démarrer le scan. Vérifiez les permissions AR et réessayez.')
@@ -323,6 +382,8 @@ const stopScan = () => {
   }
   cleanupScan()
   scanMessage.value = 'Scan arrêté. Vous pouvez relancer le scan pour capturer plus de points.'
+  scanProgress.value = 0
+  scanProgressText.value = ''
 }
 
 const renderFrame = (_timestamp: number, frame: any) => {
@@ -586,6 +647,114 @@ onBeforeUnmount(() => {
   inset: 0;
   z-index: 1;
   pointer-events: none;
+}
+
+.scan-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 20px;
+  pointer-events: none;
+}
+
+.scan-info {
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.scan-counter {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.counter-number {
+  font-size: 3rem;
+  font-weight: bold;
+  color: #4ade80;
+  margin-bottom: 5px;
+}
+
+.counter-label {
+  font-size: 1.1rem;
+  color: #e5e7eb;
+}
+
+.scan-instructions {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 15px;
+  margin-bottom: 20px;
+}
+
+.scan-instructions p {
+  margin: 5px 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.scan-progress {
+  text-align: center;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4ade80, #22d3ee);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 0.9rem;
+  color: #e5e7eb;
+  margin: 0;
+}
+
+.point-captured-feedback {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1001;
+  pointer-events: none;
+  animation: pointCapture 1s ease-out;
+}
+
+.point-indicator {
+  background: rgba(74, 222, 128, 0.9);
+  color: white;
+  padding: 12px 20px;
+  border-radius: 25px;
+  font-size: 1.1rem;
+  font-weight: bold;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes pointCapture {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  20% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1);
+  }
 }
 
 @media (max-width: 960px) {
