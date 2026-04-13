@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import RoomViewer3D from './components/RoomViewer3D.vue'
+import RoomScanner from './components/RoomScanner.vue'
 </script>
 
 <template>
-  <RoomViewer3D />
+  <RoomScanner />
 </template>
 
 <style>
