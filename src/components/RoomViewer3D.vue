@@ -3,10 +3,14 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import * as THREE from 'three'
 
 const canvasContainer = ref<HTMLDivElement>()
+const videoElement = ref<HTMLVideoElement>()
 let scene: THREE.Scene
 let camera: THREE.PerspectiveCamera
 let renderer: THREE.WebGLRenderer
 let animationId: number
+let stream: MediaStream | null = null
+let isScanning = ref(false)
+let scanPoints: THREE.Points | null = null
 
 onMounted(() => {
   if (!canvasContainer.value) return
@@ -102,7 +106,71 @@ onMounted(() => {
 
 onUnmounted(() => {
   cancelAnimationFrame(animationId)
+  stopCamera()
 })
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true })
+    if (videoElement.value) {
+      videoElement.value.srcObject = stream
+    }
+  } catch (error) {
+    console.error('Erreur d\'accès à la caméra:', error)
+  }
+}
+
+function stopCamera() {
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop())
+    stream = null
+  }
+  if (videoElement.value) {
+    videoElement.value.srcObject = null
+  }
+}
+
+function startScan() {
+  isScanning.value = true
+  // Simuler le scan en ajoutant des points 3D
+  addScanPoints()
+}
+
+function stopScan() {
+  isScanning.value = false
+}
+
+function addScanPoints() {
+  // Supprimer les anciens points si existants
+  if (scanPoints) {
+    scene.remove(scanPoints)
+  }
+
+  // Créer des points 3D simulés pour représenter le scan
+  const pointsGeometry = new THREE.BufferGeometry()
+  const positions = []
+  const colors = []
+
+  // Générer des points autour de la pièce
+  for (let i = 0; i < 1000; i++) {
+    const x = (Math.random() - 0.5) * 20
+    const y = (Math.random() - 0.5) * 6
+    const z = (Math.random() - 0.5) * 20
+
+    // Vérifier si le point est à l'intérieur de la pièce approximative
+    if (Math.abs(x) < 5 && Math.abs(y) < 1.5 && Math.abs(z) < 5) {
+      positions.push(x, y, z)
+      colors.push(Math.random(), Math.random(), Math.random())
+    }
+  }
+
+  pointsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  pointsGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+
+  const pointsMaterial = new THREE.PointsMaterial({ size: 0.05, vertexColors: true })
+  scanPoints = new THREE.Points(pointsGeometry, pointsMaterial)
+  scene.add(scanPoints)
+}
 
 function createColoredAxes() {
   // Axe X (rouge)
@@ -182,6 +250,15 @@ function createRaysFromUser() {
 
 <template>
   <div class="room-viewer-container">
+    <div class="camera-section">
+      <video ref="videoElement" autoplay playsinline muted class="camera-video"></video>
+      <div class="camera-controls">
+        <button @click="startCamera" class="btn">Ouvrir Caméra</button>
+        <button @click="stopCamera" class="btn">Fermer Caméra</button>
+        <button @click="startScan" :disabled="!stream" class="btn scan-btn">Démarrer Scan</button>
+        <button @click="stopScan" :disabled="!isScanning" class="btn stop-btn">Arrêter Scan</button>
+      </div>
+    </div>
     <div ref="canvasContainer" class="canvas-container"></div>
     <div class="info-panel">
       <h2>Repère 3D de la pièce</h2>
@@ -191,6 +268,7 @@ function createRaysFromUser() {
         <p><span class="axis-z">Z</span> (Bleu) - Profondeur</p>
       </div>
       <p class="user-position"><span class="user-marker">●</span> Position utilisateur (orangé)</p>
+      <p v-if="isScanning" class="scanning-status">🔄 Scanning en cours...</p>
     </div>
   </div>
 </template>
@@ -202,6 +280,67 @@ function createRaysFromUser() {
   display: flex;
   flex-direction: column;
   background: #0a0a0a;
+}
+
+.camera-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.8);
+  border-bottom: 1px solid #444;
+}
+
+.camera-video {
+  width: 320px;
+  height: 240px;
+  border: 2px solid #444;
+  border-radius: 8px;
+  background: #000;
+}
+
+.camera-controls {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.btn {
+  padding: 8px 16px;
+  background: #333;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.3s;
+}
+
+.btn:hover:not(:disabled) {
+  background: #555;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.scan-btn {
+  background: #006600;
+  border-color: #00aa00;
+}
+
+.scan-btn:hover:not(:disabled) {
+  background: #008800;
+}
+
+.stop-btn {
+  background: #660000;
+  border-color: #aa0000;
+}
+
+.stop-btn:hover:not(:disabled) {
+  background: #880000;
 }
 
 .canvas-container {
@@ -264,5 +403,12 @@ function createRaysFromUser() {
   margin-top: 10px;
   font-size: 14px;
   color: #ff6600;
+}
+
+.scanning-status {
+  margin-top: 10px;
+  font-size: 16px;
+  color: #ffff00;
+  font-weight: bold;
 }
 </style>
