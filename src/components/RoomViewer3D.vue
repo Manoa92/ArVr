@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import * as THREE from 'three'
+import * as cocoSsd from '@tensorflow-models/coco-ssd'
 
 const canvasContainer = ref<HTMLDivElement>()
 const videoElement = ref<HTMLVideoElement>()
@@ -11,9 +12,19 @@ let animationId: number
 let stream: MediaStream | null = null
 let isScanning = ref(false)
 let scanPoints: THREE.Points | null = null
+let scanInterval: number | null = null
+let cocoModel: cocoSsd.ObjectDetection | null = null
 
-onMounted(() => {
+onMounted(async () => {
   if (!canvasContainer.value) return
+
+  // Charger le modèle COCO-SSD
+  try {
+    cocoModel = await cocoSsd.load()
+    console.log('Modèle COCO-SSD chargé')
+  } catch (error) {
+    console.error('Erreur de chargement du modèle:', error)
+  }
 
   // Initialiser la scène
   scene = new THREE.Scene()
@@ -111,12 +122,27 @@ onUnmounted(() => {
 
 async function startCamera() {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: true })
+    stream = await navigator.mediaDevices.getUserMedia({ 
+      video: { 
+        facingMode: 'environment', // Caméra arrière
+        width: { ideal: 640 },
+        height: { ideal: 480 }
+      } 
+    })
     if (videoElement.value) {
       videoElement.value.srcObject = stream
     }
   } catch (error) {
     console.error('Erreur d\'accès à la caméra:', error)
+    // Essayer la caméra avant si la caméra arrière échoue
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true })
+      if (videoElement.value) {
+        videoElement.value.srcObject = stream
+      }
+    } catch (fallbackError) {
+      console.error('Erreur de fallback caméra:', fallbackError)
+    }
   }
 }
 
@@ -131,45 +157,92 @@ function stopCamera() {
 }
 
 function startScan() {
+  if (!stream || !videoElement.value || !cocoModel) return
+  
   isScanning.value = true
-  // Simuler le scan en ajoutant des points 3D
-  addScanPoints()
+  
+  // Scanner toutes les 2 secondes
+  scanInterval = window.setInterval(async () => {
+    if (!videoElement.value || !cocoModel) return
+    
+    try {
+      const predictions = await cocoModel.detect(videoElement.value)
+      addScanPointsFromDetections(predictions)
+    } catch (error) {
+      console.error('Erreur de détection:', error)
+    }
+  }, 2000)
 }
 
 function stopScan() {
   isScanning.value = false
+  if (scanInterval) {
+    clearInterval(scanInterval)
+    scanInterval = null
+  }
 }
 
-function addScanPoints() {
-  // Supprimer les anciens points si existants
-  if (scanPoints) {
-    scene.remove(scanPoints)
+function addScanPointsFromDetections(predictions: cocoSsd.DetectedObject[]) {
+  if (!scanPoints) {
+    // Créer le nuage de points initial
+    const pointsGeometry = new THREE.BufferGeometry()
+    const positions: number[] = []
+    const colors: number[] = []
+    pointsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    pointsGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+    
+    const pointsMaterial = new THREE.PointsMaterial({ 
+      size: 0.1, 
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.8
+    })
+    scanPoints = new THREE.Points(pointsGeometry, pointsMaterial)
+    scene.add(scanPoints)
   }
 
-  // Créer des points 3D simulés pour représenter le scan
-  const pointsGeometry = new THREE.BufferGeometry()
-  const positions = []
-  const colors = []
+  const positions = scanPoints.geometry.attributes.position.array as Float32Array
+  const colors = scanPoints.geometry.attributes.color.array as Float32Array
+  let currentCount = positions.length / 3
 
-  // Générer des points autour de la pièce
-  for (let i = 0; i < 1000; i++) {
-    const x = (Math.random() - 0.5) * 20
-    const y = (Math.random() - 0.5) * 6
-    const z = (Math.random() - 0.5) * 20
+  predictions.forEach(prediction => {
+    // Convertir les coordonnées 2D en 3D approximatives
+    const x = (prediction.bbox[0] / 640 - 0.5) * 10 // Normaliser et scaler
+    const y = (prediction.bbox[1] / 480 - 0.5) * -6 + 1 // Inverser Y et ajuster hauteur
+    const z = -5 + Math.random() * 10 // Profondeur aléatoire
+    
+    // Ajouter le point
+    positions[currentCount * 3] = x
+    positions[currentCount * 3 + 1] = y
+    positions[currentCount * 3 + 2] = z
+    
+    // Couleur basée sur la classe d'objet
+    const color = getColorForClass(prediction.class)
+    colors[currentCount * 3] = color.r
+    colors[currentCount * 3 + 1] = color.g
+    colors[currentCount * 3 + 2] = color.b
+    
+    currentCount++
+  })
 
-    // Vérifier si le point est à l'intérieur de la pièce approximative
-    if (Math.abs(x) < 5 && Math.abs(y) < 1.5 && Math.abs(z) < 5) {
-      positions.push(x, y, z)
-      colors.push(Math.random(), Math.random(), Math.random())
-    }
+  // Mettre à jour la géométrie
+  scanPoints.geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions.slice(0, currentCount * 3), 3))
+  scanPoints.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors.slice(0, currentCount * 3), 3))
+  scanPoints.geometry.attributes.position.needsUpdate = true
+  scanPoints.geometry.attributes.color.needsUpdate = true
+}
+
+function getColorForClass(className: string): {r: number, g: number, b: number} {
+  const colors: { [key: string]: {r: number, g: number, b: number} } = {
+    'person': {r: 1, g: 0, b: 0}, // Rouge pour personnes
+    'chair': {r: 0, g: 1, b: 0}, // Vert pour chaises
+    'table': {r: 0, g: 0, b: 1}, // Bleu pour tables
+    'tv': {r: 1, g: 1, b: 0}, // Jaune pour TV
+    'laptop': {r: 1, g: 0, b: 1}, // Magenta pour ordinateurs
+    'book': {r: 0, g: 1, b: 1}, // Cyan pour livres
+    'bottle': {r: 0.5, g: 0.5, b: 0.5}, // Gris pour bouteilles
   }
-
-  pointsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  pointsGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
-
-  const pointsMaterial = new THREE.PointsMaterial({ size: 0.05, vertexColors: true })
-  scanPoints = new THREE.Points(pointsGeometry, pointsMaterial)
-  scene.add(scanPoints)
+  return colors[className] || {r: Math.random(), g: Math.random(), b: Math.random()}
 }
 
 function createColoredAxes() {
@@ -255,7 +328,7 @@ function createRaysFromUser() {
       <div class="camera-controls">
         <button @click="startCamera" class="btn">Ouvrir Caméra</button>
         <button @click="stopCamera" class="btn">Fermer Caméra</button>
-        <button @click="startScan" :disabled="!stream" class="btn scan-btn">Démarrer Scan</button>
+        <button @click="startScan" :disabled="!stream || !cocoModel" class="btn scan-btn">Démarrer Scan</button>
         <button @click="stopScan" :disabled="!isScanning" class="btn stop-btn">Arrêter Scan</button>
       </div>
     </div>
@@ -268,7 +341,8 @@ function createRaysFromUser() {
         <p><span class="axis-z">Z</span> (Bleu) - Profondeur</p>
       </div>
       <p class="user-position"><span class="user-marker">●</span> Position utilisateur (orangé)</p>
-      <p v-if="isScanning" class="scanning-status">🔄 Scanning en cours...</p>
+      <p v-if="!cocoModel" class="loading-model">🔄 Chargement du modèle de détection...</p>
+      <p v-if="isScanning" class="scanning-status">🔄 Scanning en cours... Objets détectés s'ajoutent au nuage de points</p>
     </div>
   </div>
 </template>
@@ -410,5 +484,11 @@ function createRaysFromUser() {
   font-size: 16px;
   color: #ffff00;
   font-weight: bold;
+}
+
+.loading-model {
+  margin-top: 10px;
+  font-size: 14px;
+  color: #ffaa00;
 }
 </style>
