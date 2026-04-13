@@ -28,6 +28,8 @@ const scanPoints = ref<ScanPoint[]>([])
 const userPosition = ref<UserPosition>({ x: 0, y: 0, z: 0 })
 const xrMessage = ref('')
 const fps = ref(0)
+const isSidebarOpen = ref(true)
+const isVideoPopupOpen = ref(false)
 const lastXRPosition = ref<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 })
 
 // Three.js objets
@@ -470,7 +472,17 @@ function onWindowResize() {
   <div class="room-scanner-container">
     <!-- Header -->
     <div class="header">
-      <h1>🏠 Room Scanner 3D + GPS Intérieur</h1>
+      <div class="header-row">
+        <h1>🏠 Room Scanner 3D + GPS Intérieur</h1>
+        <div class="header-actions">
+          <button @click="isSidebarOpen = !isSidebarOpen" class="btn btn-secondary small">
+            {{ isSidebarOpen ? 'Fermer menu' : 'Ouvrir menu' }}
+          </button>
+          <button @click="isVideoPopupOpen = !isVideoPopupOpen" class="btn btn-primary small">
+            {{ isVideoPopupOpen ? 'Fermer vidéo' : 'Voir vidéo' }}
+          </button>
+        </div>
+      </div>
       <div class="info-bar">
         <span :class="['xr-status', { supported: isXRSupported }]">{{ xrMessage }}</span>
         <span class="fps-counter">FPS: {{ fps }}</span>
@@ -483,73 +495,45 @@ function onWindowResize() {
       <div class="viewer-section">
         <div ref="canvasContainer" class="canvas-container"></div>
       </div>
+    </div>
 
-      <!-- Minimap -->
-      <div class="minimap-section">
-        <h3>📍 GPS Intérieur</h3>
-        <canvas
-          ref="minimapCanvas"
-          width="300"
-          height="300"
-          class="minimap"
-        ></canvas>
-        <div class="position-info">
-          <p><strong>Position:</strong></p>
-          <p>X: {{ userPosition.x.toFixed(2) }} m</p>
-          <p>Y: {{ userPosition.y.toFixed(2) }} m</p>
-          <p>Z: {{ userPosition.z.toFixed(2) }} m</p>
+    <aside class="sidebar" :class="{ open: isSidebarOpen }">
+      <div class="sidebar-header">
+        <h3>📦 Menu</h3>
+        <button @click="isSidebarOpen = false" class="btn btn-icon">×</button>
+      </div>
+      <div class="sidebar-body">
+        <div class="minimap-section">
+          <h3>📍 GPS Intérieur</h3>
+          <canvas ref="minimapCanvas" width="300" height="300" class="minimap"></canvas>
+          <div class="position-info">
+            <p><strong>Position:</strong></p>
+            <p>X: {{ userPosition.x.toFixed(2) }} m</p>
+            <p>Y: {{ userPosition.y.toFixed(2) }} m</p>
+            <p>Z: {{ userPosition.z.toFixed(2) }} m</p>
+          </div>
+        </div>
+
+        <div class="controls-panel">
+          <div class="control-group">
+            <h3>📹 Caméra & AR</h3>
+            <button @click="startCamera" class="btn btn-primary">Ouvrir Caméra</button>
+            <button @click="stopCamera" class="btn btn-secondary">Fermer Caméra</button>
+            <button @click="startXR" :disabled="!isXRSupported || isXRActive" class="btn btn-success">
+              Démarrer AR (WebXR)
+            </button>
+            <button @click="stopXR" :disabled="!isXRActive" class="btn btn-danger">Arrêter AR</button>
+          </div>
+
+          <div class="control-group">
+            <h3>🔍 Scanning</h3>
+            <button @click="startManualScan" :disabled="isScanning" class="btn btn-primary">Démarrer Scan Manuel</button>
+            <button @click="stopManualScan" :disabled="!isScanning" class="btn btn-secondary">Arrêter Scan</button>
+            <button @click="clearScan" class="btn btn-warning">Effacer Points ({{ scanPoints.length }})</button>
+          </div>
         </div>
       </div>
-    </div>
-
-    <!-- Controls -->
-    <div class="controls-panel">
-      <div class="control-group">
-        <h3>📹 Caméra & AR</h3>
-        <button @click="startCamera" class="btn btn-primary">Ouvrir Caméra</button>
-        <button @click="stopCamera" class="btn btn-secondary">Fermer Caméra</button>
-        <button 
-          @click="startXR" 
-          :disabled="!isXRSupported || isXRActive"
-          class="btn btn-success"
-        >
-          Démarrer AR (WebXR)
-        </button>
-        <button 
-          @click="stopXR" 
-          :disabled="!isXRActive"
-          class="btn btn-danger"
-        >
-          Arrêter AR
-        </button>
-      </div>
-
-      <div class="control-group">
-        <h3>🔍 Scanning</h3>
-        <button 
-          @click="startManualScan" 
-          :disabled="isScanning"
-          class="btn btn-primary"
-        >
-          Démarrer Scan Manuel
-        </button>
-        <button 
-          @click="stopManualScan" 
-          :disabled="!isScanning"
-          class="btn btn-secondary"
-        >
-          Arrêter Scan
-        </button>
-        <button @click="clearScan" class="btn btn-warning">
-          Effacer Points ({{ scanPoints.length }})
-        </button>
-      </div>
-
-      <div class="control-group">
-        <h3>📹 Vidéo Caméra</h3>
-        <video ref="videoElement" autoplay playsinline muted class="video-preview"></video>
-      </div>
-    </div>
+    </aside>
 
     <!-- Debug Info -->
     <div class="debug-info">
@@ -557,49 +541,66 @@ function onWindowResize() {
       <p><strong>XR Status:</strong> {{ isXRActive ? 'Actif' : 'Inactif' }}</p>
       <p><strong>Scanning:</strong> {{ isScanning ? '🟢 En cours' : '🔴 Arrêté' }}</p>
     </div>
+
+    <div v-if="isVideoPopupOpen" class="popup-overlay" @click.self="isVideoPopupOpen = false">
+      <div class="video-popup">
+        <div class="popup-header">
+          <h3>🔴 Vidéo Caméra</h3>
+          <button @click="isVideoPopupOpen = false" class="btn btn-icon">×</button>
+        </div>
+        <video ref="videoElement" autoplay playsinline muted class="popup-video"></video>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .room-scanner-container {
-  width: 100%;
+  width: 100vw;
   height: 100vh;
-  display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  display: flex;
+  flex-direction: column;
   background: #0a0a0a;
   color: #fff;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  gap: 0;
+  overflow: hidden;
 }
 
+/* ===== HEADER (Compact) ===== */
 .header {
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-  padding: 15px 20px;
+  padding: 8px 12px;
   border-bottom: 2px solid #00ff88;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5);
+  flex-shrink: 0;
+  min-height: 50px;
 }
 
 .header h1 {
   margin: 0;
-  font-size: 24px;
+  font-size: 16px;
   background: linear-gradient(90deg, #00ff88, #00ccff);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .info-bar {
   display: flex;
-  gap: 20px;
-  margin-top: 10px;
-  font-size: 12px;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 10px;
+  flex-wrap: wrap;
 }
 
 .xr-status {
-  padding: 4px 12px;
-  border-radius: 4px;
+  padding: 2px 8px;
+  border-radius: 3px;
   background: #333;
   border: 1px solid #555;
+  white-space: nowrap;
 }
 
 .xr-status.supported {
@@ -609,25 +610,30 @@ function onWindowResize() {
 }
 
 .fps-counter {
-  padding: 4px 12px;
+  padding: 2px 8px;
   background: #1a1a2a;
-  border-radius: 4px;
+  border-radius: 3px;
   font-family: monospace;
   color: #00ffff;
+  white-space: nowrap;
 }
 
+/* ===== MAIN CONTENT (Flexbox) ===== */
 .main-content {
-  display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 10px;
-  padding: 10px;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  flex: 1;
+  overflow: hidden;
 }
 
 .viewer-section {
   background: #000;
   border: 2px solid #333;
-  border-radius: 8px;
+  border-radius: 6px;
   overflow: hidden;
+  flex: 1;
+  min-width: 0;
 }
 
 .canvas-container {
@@ -635,78 +641,96 @@ function onWindowResize() {
   height: 100%;
 }
 
+/* ===== MINIMAP (Compact & Responsive) ===== */
 .minimap-section {
   background: #1a1a2e;
   border: 2px solid #333;
-  border-radius: 8px;
-  padding: 12px;
+  border-radius: 6px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
+  min-width: 180px;
+  width: 200px;
+  flex-shrink: 0;
 }
 
 .minimap-section h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: 11px;
   color: #00ff88;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .minimap {
   border: 1px solid #555;
-  border-radius: 4px;
+  border-radius: 3px;
   background: #0a0a0a;
   width: 100%;
   aspect-ratio: 1;
+  min-height: 120px;
 }
 
 .position-info {
-  font-size: 11px;
+  font-size: 9px;
   background: #0a0a0a;
-  padding: 8px;
-  border-radius: 4px;
+  padding: 6px;
+  border-radius: 3px;
   border: 1px solid #333;
 }
 
 .position-info p {
-  margin: 2px 0;
+  margin: 1px 0;
   font-family: monospace;
   color: #00ccff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
+/* ===== CONTROLS PANEL (Horizontal + Compact) ===== */
 .controls-panel {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 15px;
-  padding: 15px;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
   background: #1a1a2e;
   border-top: 1px solid #333;
-  max-height: 250px;
+  flex-wrap: wrap;
+  align-items: center;
+  flex-shrink: 0;
   overflow-y: auto;
+  max-height: 100px;
 }
 
 .control-group {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
 }
 
 .control-group h3 {
   margin: 0;
-  font-size: 12px;
+  font-size: 9px;
   color: #00ff88;
   text-transform: uppercase;
+  white-space: nowrap;
+  flex-basis: 100%;
 }
 
 .btn {
-  padding: 8px 12px;
+  padding: 5px 10px;
   border: 1px solid #555;
-  border-radius: 4px;
+  border-radius: 3px;
   background: #2a2a3e;
   color: #fff;
   cursor: pointer;
-  font-size: 12px;
-  transition: all 0.3s;
+  font-size: 10px;
+  transition: all 0.2s;
   text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .btn:hover:not(:disabled) {
@@ -722,7 +746,7 @@ function onWindowResize() {
 
 .btn-primary:not(:disabled):hover {
   background: #1a4a1a;
-  box-shadow: 0 0 10px rgba(0, 255, 136, 0.3);
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.2);
 }
 
 .btn-secondary:not(:disabled) {
@@ -760,46 +784,140 @@ function onWindowResize() {
 }
 
 .video-preview {
-  width: 100%;
+  height: 60px;
+  width: 80px;
   border: 1px solid #555;
-  border-radius: 4px;
+  border-radius: 3px;
   background: #000;
-  aspect-ratio: 4/3;
   object-fit: cover;
+  flex-shrink: 0;
 }
 
+/* ===== DEBUG INFO (Very Compact) ===== */
 .debug-info {
   background: #0a0a0a;
-  padding: 10px 15px;
+  padding: 4px 8px;
   border-top: 1px solid #333;
-  font-size: 11px;
+  font-size: 9px;
   font-family: monospace;
   color: #00ccff;
   display: flex;
-  gap: 20px;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  flex-shrink: 0;
+  overflow: hidden;
 }
 
 .debug-info p {
   margin: 0;
+  white-space: nowrap;
 }
 
-@media (max-width: 1024px) {
+/* ===== RESPONSIVE: Mobile ===== */
+@media (max-width: 768px) {
+  .header {
+    min-height: 45px;
+    padding: 6px 8px;
+  }
+
+  .header h1 {
+    font-size: 14px;
+  }
+
   .main-content {
-    grid-template-columns: 1fr;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .minimap-section {
-    position: absolute;
-    bottom: 260px;
-    right: 10px;
-    width: 300px;
-    background: rgba(26, 26, 46, 0.95);
-    backdrop-filter: blur(4px);
-    z-index: 100;
+    width: 100%;
+    min-width: auto;
+    max-height: 150px;
+  }
+
+  .minimap {
+    min-height: 100px;
   }
 
   .controls-panel {
-    max-height: 150px;
+    max-height: 85px;
+    padding: 6px;
+  }
+
+  .btn {
+    padding: 4px 8px;
+    font-size: 9px;
+  }
+
+  .video-preview {
+    height: 50px;
+    width: 70px;
+  }
+
+  .debug-info {
+    font-size: 8px;
+    padding: 3px 6px;
+    gap: 8px;
+  }
+}
+
+/* ===== RESPONSIVE: Very Small ===== */
+@media (max-width: 480px) {
+  .header {
+    min-height: 40px;
+    padding: 4px 6px;
+  }
+
+  .header h1 {
+    font-size: 13px;
+  }
+
+  .info-bar {
+    font-size: 8px;
+    gap: 8px;
+  }
+
+  .main-content {
+    gap: 4px;
+    padding: 4px;
+  }
+
+  .minimap-section {
+    width: 100%;
+    min-width: auto;
+    max-height: 120px;
+    padding: 6px;
+  }
+
+  .minimap {
+    min-height: 80px;
+  }
+
+  .controls-panel {
+    max-height: 75px;
+    padding: 4px;
+    gap: 4px;
+  }
+
+  .control-group {
+    gap: 2px;
+  }
+
+  .btn {
+    padding: 3px 6px;
+    font-size: 8px;
+  }
+
+  .video-preview {
+    height: 45px;
+    width: 60px;
+  }
+
+  .debug-info {
+    font-size: 7px;
+    padding: 2px 4px;
+    gap: 6px;
   }
 }
 </style>
