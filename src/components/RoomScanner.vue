@@ -19,6 +19,7 @@ interface UserPosition {
 const canvasContainer = ref<HTMLDivElement>()
 const minimapCanvas = ref<HTMLCanvasElement>()
 const videoElement = ref<HTMLVideoElement>()
+const overlayCanvas = ref<HTMLCanvasElement>()
 
 // États
 const isXRSupported = ref(false)
@@ -38,6 +39,7 @@ let camera: THREE.PerspectiveCamera
 let renderer: THREE.WebGLRenderer
 let animationId: number
 let minimapCtx: CanvasRenderingContext2D | null = null
+let overlayCtx: CanvasRenderingContext2D | null = null
 
 // WebXR
 let xrSession: XRSession | null = null
@@ -75,6 +77,11 @@ onMounted(async () => {
   // Setup minimap
   if (minimapCanvas.value) {
     minimapCtx = minimapCanvas.value.getContext('2d')
+  }
+
+  // Setup overlay canvas
+  if (overlayCanvas.value) {
+    overlayCtx = overlayCanvas.value.getContext('2d')
   }
 
   // Lancer animation
@@ -381,6 +388,48 @@ function updatePointsVisualization() {
   pointsMesh.geometry.attributes.color.needsUpdate = true
 }
 
+function updateOverlayCanvas() {
+  if (!overlayCtx || !overlayCanvas.value || !isVideoPopupOpen.value) return
+
+  const canvas = overlayCanvas.value
+  const ctx = overlayCtx
+
+  // Clear canvas
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+  // Set canvas size to match video
+  if (videoElement.value) {
+    canvas.width = videoElement.value.videoWidth || 640
+    canvas.height = videoElement.value.videoHeight || 480
+  }
+
+  // Only draw points if scanning
+  if (!isScanning.value || scanPoints.value.length === 0) return
+
+  // Project 3D points to 2D screen coordinates
+  const cameraMatrix = camera.matrixWorldInverse
+  const projectionMatrix = camera.projectionMatrix
+  const viewProjectionMatrix = new THREE.Matrix4().multiplyMatrices(projectionMatrix, cameraMatrix)
+
+  scanPoints.value.forEach(point => {
+    const worldPos = new THREE.Vector3(point.position.x, point.position.y, point.position.z)
+    const screenPos = worldPos.clone()
+    screenPos.applyMatrix4(viewProjectionMatrix)
+
+    // Convert from NDC (-1 to 1) to screen coordinates
+    const x = (screenPos.x + 1) * canvas.width / 2
+    const y = (-screenPos.y + 1) * canvas.height / 2
+
+    // Only draw if point is in front of camera and within screen bounds
+    if (screenPos.z > 0 && x >= 0 && x <= canvas.width && y >= 0 && y <= canvas.height) {
+      ctx.fillStyle = `rgba(${Math.floor(point.color.r * 255)}, ${Math.floor(point.color.g * 255)}, ${Math.floor(point.color.b * 255)}, 0.8)`
+      ctx.beginPath()
+      ctx.arc(x, y, 4, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  })
+}
+
 function updateMinimap() {
   if (!minimapCtx || !minimapCanvas.value) return
 
@@ -455,6 +504,7 @@ function animate() {
   }
 
   updateMinimap()
+  updateOverlayCanvas() // Update overlay even when not scanning for smooth visuals
   renderer.render(scene, camera)
 }
 
@@ -548,7 +598,10 @@ function onWindowResize() {
           <h3>🔴 Vidéo Caméra</h3>
           <button @click="isVideoPopupOpen = false" class="btn btn-icon">×</button>
         </div>
-        <video ref="videoElement" autoplay playsinline muted class="popup-video"></video>
+        <div class="video-container">
+          <video ref="videoElement" autoplay playsinline muted class="popup-video"></video>
+          <canvas ref="overlayCanvas" class="overlay-canvas"></canvas>
+        </div>
       </div>
     </div>
   </div>
@@ -919,5 +972,81 @@ function onWindowResize() {
     padding: 2px 4px;
     gap: 6px;
   }
+}
+
+/* ===== POPUP STYLES ===== */
+.popup-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.video-popup {
+  background: #1a1a2e;
+  border: 2px solid #00ff88;
+  border-radius: 8px;
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+}
+
+.popup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid #333;
+  background: #0a0a0a;
+  border-radius: 6px 6px 0 0;
+}
+
+.popup-header h3 {
+  margin: 0;
+  color: #00ff88;
+  font-size: 16px;
+}
+
+.video-container {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.popup-video {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: 0 0 6px 6px;
+}
+
+.overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  border-radius: 0 0 6px 6px;
+}
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  color: #ff4444;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 3px;
+}
+
+.btn-icon:hover {
+  background: #4a1a1a;
 }
 </style>
