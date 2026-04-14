@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 const videoRef = ref<HTMLVideoElement | null>(null)
 const scannerCanvasRef = ref<HTMLCanvasElement | null>(null)
+const overlayCanvasRef = ref<HTMLCanvasElement | null>(null)
 const sceneContainerRef = ref<HTMLDivElement | null>(null)
 
 const cameraActive = ref(false)
@@ -16,6 +17,8 @@ const frameCount = ref(0)
 let mediaStream: MediaStream | null = null
 let scannerRafId = 0
 let renderRafId = 0
+
+let lastOverlayPoints: { x: number; y: number; r: number; g: number; b: number; depth: number }[] = []
 
 const sceneState = shallowRef<{
   scene: THREE.Scene
@@ -141,6 +144,7 @@ function sampleRoomToPointCloud() {
 
   const positions: number[] = []
   const colors: number[] = []
+  const overlayPts: typeof lastOverlayPoints = []
 
   const step = 3
   frameCount.value += 1
@@ -172,12 +176,59 @@ function sampleRoomToPointCloud() {
       positions.push(xNorm * 6.4, yNorm * 3.6, z)
 
       const colorDepth = 1 - estimatedDepth
-      colors.push(colorDepth, 0.35 + contrastBoost * 0.45, estimatedDepth)
+      const cr = colorDepth
+      const cg = 0.35 + contrastBoost * 0.45
+      const cb = estimatedDepth
+      colors.push(cr, cg, cb)
+
+      overlayPts.push({ x, y, r: cr, g: cg, b: cb, depth: estimatedDepth })
     }
   }
 
+  lastOverlayPoints = overlayPts
   updatePointCloud(positions, colors)
   statusMessage.value = `Scanning in progress (${pointCount.value} xyz points)`
+}
+
+function drawOverlay() {
+  const video = videoRef.value
+  const canvas = overlayCanvasRef.value
+  if (!video || !canvas || video.videoWidth === 0) {
+    return
+  }
+
+  const displayW = canvas.clientWidth
+  const displayH = canvas.clientHeight
+  if (canvas.width !== displayW || canvas.height !== displayH) {
+    canvas.width = displayW
+    canvas.height = displayH
+  }
+
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    return
+  }
+
+  ctx.drawImage(video, 0, 0, displayW, displayH)
+
+  const sampleWidth = 160
+  const sampleHeight = 120
+  const scaleX = displayW / sampleWidth
+  const scaleY = displayH / sampleHeight
+  const dotSize = Math.max(2, Math.min(scaleX, scaleY) * 1.6)
+
+  for (const pt of lastOverlayPoints) {
+    const px = pt.x * scaleX
+    const py = pt.y * scaleY
+    const alpha = 0.35 + pt.depth * 0.55
+    const ri = Math.round(pt.r * 255)
+    const gi = Math.round(pt.g * 255)
+    const bi = Math.round(pt.b * 255)
+    ctx.fillStyle = `rgba(${ri},${gi},${bi},${alpha.toFixed(2)})`
+    ctx.beginPath()
+    ctx.arc(px, py, dotSize, 0, Math.PI * 2)
+    ctx.fill()
+  }
 }
 
 function scanLoop() {
@@ -186,6 +237,7 @@ function scanLoop() {
   }
 
   sampleRoomToPointCloud()
+  drawOverlay()
   scannerRafId = requestAnimationFrame(scanLoop)
 }
 
@@ -340,6 +392,19 @@ onBeforeUnmount(() => {
         XYZ output is an estimated monocular depth map, useful as a lightweight room reconstruction preview.
       </small>
     </section>
+
+    <section class="panel overlay-panel">
+      <h2>AR Overlay</h2>
+      <div class="overlay-host">
+        <canvas ref="overlayCanvasRef" class="overlay-canvas"></canvas>
+        <div v-if="!scanning" class="overlay-placeholder">
+          Start scanning to see points overlaid on camera
+        </div>
+      </div>
+      <small>
+        Points are drawn on top of the camera feed so you can check alignment with walls &amp; objects.
+      </small>
+    </section>
   </main>
 </template>
 
@@ -347,7 +412,8 @@ onBeforeUnmount(() => {
 .scanner-page {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: minmax(320px, 420px) minmax(380px, 1fr);
+  grid-template-columns: minmax(300px, 380px) 1fr 1fr;
+  grid-template-rows: 1fr;
   gap: 1rem;
   padding: 1rem;
   box-sizing: border-box;
@@ -453,13 +519,68 @@ small {
   line-height: 1.45;
 }
 
+.overlay-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.overlay-panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.15rem;
+}
+
+.overlay-host {
+  position: relative;
+  flex: 1;
+  min-height: 400px;
+  border-radius: 12px;
+  border: 1px solid rgba(152, 196, 221, 0.32);
+  overflow: hidden;
+  background: #000;
+}
+
+.overlay-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.overlay-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6a8da6;
+  font-size: 0.95rem;
+  pointer-events: none;
+}
+
+@media (max-width: 1200px) {
+  .scanner-page {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .controls {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 980px) {
   .scanner-page {
     grid-template-columns: 1fr;
   }
 
+  .controls {
+    grid-column: 1;
+  }
+
   .scene-host {
     min-height: 380px;
+  }
+
+  .overlay-host {
+    min-height: 300px;
   }
 }
 </style>
