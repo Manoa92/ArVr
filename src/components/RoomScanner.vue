@@ -12,19 +12,16 @@ const cameraActive = ref(false)
 const scanning = ref(false)
 const statusMessage = ref('Camera is off')
 const pointCount = ref(0)
-const frameCount = ref(0)
+const captureCount = ref(0)
+const hasGyro = ref(false)
+const manualYaw = ref(0) // degrees, desktop fallback
 
 interface Marker {
   id: number
-  sx: number  // sample-space x (0..160)
-  sy: number  // sample-space y (0..120)
-  x3d: number
-  y3d: number
-  z3d: number
+  wx: number  // world-space x (fixed)
+  wy: number  // world-space y (fixed)
+  wz: number  // world-space z (fixed)
   label: string
-  patch: Uint8ClampedArray  // grayscale template patch
-  patchSize: number
-  lost: boolean
 }
 
 const markers = ref<Marker[]>([])
@@ -35,12 +32,27 @@ let scannerRafId = 0
 let renderRafId = 0
 let markerMeshes: THREE.Mesh[] = []
 
-let lastOverlayPoints: { x: number; y: number; r: number; g: number; b: number; depth: number }[] = []
-let lastFrameGray: Uint8ClampedArray | null = null
-const PATCH_HALF = 7  // patch is (2*7+1) = 15x15
-const SEARCH_RADIUS = 18
+// Orientation from device
+let orientAlpha = 0
+let orientBeta = 0
+
+// Accumulated world-space point cloud
+let accPositions: number[] = []
+let accColors: number[] = []
+
+// Per-frame view-space data (for overlay + click)
+let frameViewPts: { px: number; py: number; vx: number; vy: number; vz: number; cr: number; cg: number; cb: number; depth: number }[] = []
+
+let lastCaptureYaw = -999
+const AUTO_CAPTURE_ANGLE = 8 * Math.PI / 180
 const SAMPLE_W = 160
 const SAMPLE_H = 120
+const MAX_WORLD_POINTS = 250000
+
+// Pinhole camera model
+const HFOV = 55 * Math.PI / 180
+const TAN_HALF_H = Math.tan(HFOV / 2)
+const TAN_HALF_V = TAN_HALF_H * (SAMPLE_H / SAMPLE_W)
 
 const sceneState = shallowRef<{
   scene: THREE.Scene
@@ -131,248 +143,199 @@ function updateSize() {
   state.renderer.setSize(width, height)
 }
 
-function updatePointCloud(positions: number[], colors: number[]) {
+function syncCloudToScene() {
   const state = sceneState.value
   if (!state) {
     return
   }
 
-  state.pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  state.pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+  state.pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(accPositions, 3))
+  state.pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(accColors, 3))
   state.pointGeometry.computeBoundingSphere()
-  pointCount.value = positions.length / 3
+  pointCount.value = accPositions.length / 3
 }
 
-function extractGrayscale(data: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
-  const gray = new Uint8ClampedArray(w * h)
-  for (let i = 0; i < w * h; i++) {
-    const off = i * 4
-    gray[i] = Math.round(0.2126 * data[off] + 0.7152 * data[off + 1] + 0.0722 * data[off + 2])
-  }
-  return gray
+// ──────────────── Orientation ────────────────
+
+function onDeviceOrientation(e: DeviceOrientationEvent) {
+  if (e.alpha == null || e.beta == null) return
+  hasGyro.value = true
+  orientAlpha = e.alpha * Math.PI / 180
+  orientBeta = (e.beta ?? 0) * Math.PI / 180
 }
 
-function extractPatch(gray: Uint8ClampedArray, cx: number, cy: number, half: number, w: number, h: number): Uint8ClampedArray {
-  const size = 2 * half + 1
-  const patch = new Uint8ClampedArray(size * size)
-  for (let dy = -half; dy <= half; dy++) {
-    for (let dx = -half; dx <= half; dx++) {
-      const px = Math.max(0, Math.min(w - 1, cx + dx))
-      const py = Math.max(0, Math.min(h - 1, cy + dy))
-      patch[(dy + half) * size + (dx + half)] = gray[py * w + px]
-    }
-  }
-  return patch
-}
-
-function matchPatch(gray: Uint8ClampedArray, patch: Uint8ClampedArray, patchSize: number, lastX: number, lastY: number, searchRadius: number, w: number, h: number): { bx: number; by: number; score: number } {
-  const half = (patchSize - 1) / 2
-  let bestScore = Infinity
-  let bx = lastX
-  let by = lastY
-
-  const x0 = Math.max(half, lastX - searchRadius)
-  const x1 = Math.min(w - 1 - half, lastX + searchRadius)
-  const y0 = Math.max(half, lastY - searchRadius)
-  const y1 = Math.min(h - 1 - half, lastY + searchRadius)
-
-  for (let cy = y0; cy <= y1; cy += 1) {
-    for (let cx = x0; cx <= x1; cx += 1) {
-      let sad = 0
-      for (let dy = -half; dy <= half; dy++) {
-        const rowOff = (cy + dy) * w
-        const patchRow = (dy + half) * patchSize
-        for (let dx = -half; dx <= half; dx++) {
-          sad += Math.abs(gray[rowOff + cx + dx] - patch[patchRow + (dx + half)])
-        }
+async function initOrientation() {
+  const DOE = DeviceOrientationEvent as any
+  if (typeof DOE.requestPermission === 'function') {
+    try {
+      const result = await DOE.requestPermission()
+      if (result === 'granted') {
+        window.addEventListener('deviceorientation', onDeviceOrientation, true)
       }
-      if (sad < bestScore) {
-        bestScore = sad
-        bx = cx
-        by = cy
-      }
-    }
-  }
-
-  const numPixels = patchSize * patchSize
-  return { bx, by, score: bestScore / numPixels }
-}
-
-function trackMarkers(gray: Uint8ClampedArray) {
-  const state = sceneState.value
-  for (const mk of markers.value) {
-    if (mk.lost) continue
-
-    const result = matchPatch(gray, mk.patch, mk.patchSize, Math.round(mk.sx), Math.round(mk.sy), SEARCH_RADIUS, SAMPLE_W, SAMPLE_H)
-
-    // If average SAD per pixel is too high, mark as lost
-    if (result.score > 38) {
-      mk.lost = true
-      continue
-    }
-
-    mk.sx = result.bx
-    mk.sy = result.by
-
-    // Recompute 3D from new 2D position
-    const xNorm = mk.sx / SAMPLE_W - 0.5
-    const yNorm = 0.5 - mk.sy / SAMPLE_H
-    const lum = gray[Math.round(mk.sy) * SAMPLE_W + Math.round(mk.sx)]
-    const estimatedDepth = (255 - lum) / 255
-    const frameWave = Math.sin(frameCount.value * 0.09) * 0.18
-    mk.x3d = xNorm * 6.4
-    mk.y3d = yNorm * 3.6
-    mk.z3d = estimatedDepth * 3.4 + frameWave
-
-    // Update 3D mesh
-    if (state) {
-      const mesh = markerMeshes.find(m => m.name === `marker-${mk.id}`)
-      if (mesh) {
-        mesh.position.set(mk.x3d, mk.y3d, mk.z3d)
-      }
-    }
-
-    // Refresh patch template periodically to adapt to lighting changes
-    if (frameCount.value % 15 === 0) {
-      mk.patch = extractPatch(gray, result.bx, result.by, PATCH_HALF, SAMPLE_W, SAMPLE_H)
-    }
+    } catch { /* denied */ }
+  } else {
+    window.addEventListener('deviceorientation', onDeviceOrientation, true)
   }
 }
 
-function sampleRoomToPointCloud() {
+function currentYaw(): number {
+  return hasGyro.value ? orientAlpha : (manualYaw.value * Math.PI / 180)
+}
+
+function currentPitch(): number {
+  return hasGyro.value ? orientBeta : 0
+}
+
+function viewToWorldMatrix(): THREE.Matrix4 {
+  const m = new THREE.Matrix4()
+  m.makeRotationFromEuler(new THREE.Euler(-currentPitch(), currentYaw(), 0, 'YXZ'))
+  return m
+}
+
+function worldToViewMatrix(): THREE.Matrix4 {
+  return viewToWorldMatrix().clone().invert()
+}
+
+// ──────────────── Projection ────────────────
+
+function projectWorldToScreen(wx: number, wy: number, wz: number, dw: number, dh: number): { sx: number; sy: number; visible: boolean } {
+  const inv = worldToViewMatrix()
+  const v = new THREE.Vector3(wx, wy, wz)
+  v.applyMatrix4(inv)
+
+  if (v.z >= -0.05) return { sx: 0, sy: 0, visible: false }
+
+  const negZ = -v.z
+  const ndcX = v.x / (2 * TAN_HALF_H * negZ)
+  const ndcY = v.y / (2 * TAN_HALF_V * negZ)
+
+  const visible = ndcX >= -0.5 && ndcX <= 0.5 && ndcY >= -0.5 && ndcY <= 0.5
+  return {
+    sx: (ndcX + 0.5) * dw,
+    sy: (0.5 - ndcY) * dh,
+    visible
+  }
+}
+
+// ──────────────── Frame Processing ────────────────
+
+function processFrame() {
   const video = videoRef.value
-  const scanCanvas = scannerCanvasRef.value
-  if (!video || !scanCanvas || video.videoWidth === 0 || video.videoHeight === 0) {
-    return
-  }
+  const canvas = scannerCanvasRef.value
+  if (!video || !canvas || video.videoWidth === 0) return
 
-  const sampleWidth = 160
-  const sampleHeight = 120
-  scanCanvas.width = sampleWidth
-  scanCanvas.height = sampleHeight
+  canvas.width = SAMPLE_W
+  canvas.height = SAMPLE_H
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return
 
-  const ctx = scanCanvas.getContext('2d', { willReadFrequently: true })
-  if (!ctx) {
-    return
-  }
+  ctx.drawImage(video, 0, 0, SAMPLE_W, SAMPLE_H)
+  const data = ctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H).data
 
-  ctx.drawImage(video, 0, 0, sampleWidth, sampleHeight)
-  const imageData = ctx.getImageData(0, 0, sampleWidth, sampleHeight)
-  const data = imageData.data
-
-  const positions: number[] = []
-  const colors: number[] = []
-  const overlayPts: typeof lastOverlayPoints = []
-
+  frameViewPts = []
   const step = 3
-  frameCount.value += 1
-  const frameWave = Math.sin(frameCount.value * 0.09) * 0.18
 
-  for (let y = 0; y < sampleHeight; y += step) {
-    for (let x = 0; x < sampleWidth; x += step) {
-      const i = (y * sampleWidth + x) * 4
-      const r = data[i]
-      const g = data[i + 1]
-      const b = data[i + 2]
-      const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  for (let py = 0; py < SAMPLE_H; py += step) {
+    for (let px = 0; px < SAMPLE_W; px += step) {
+      const i = (py * SAMPLE_W + px) * 4
+      const r = data[i], g = data[i + 1], b = data[i + 2]
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-      const nextX = Math.min(x + 1, sampleWidth - 1)
-      const nextY = Math.min(y + 1, sampleHeight - 1)
-      const iX = (y * sampleWidth + nextX) * 4
-      const iY = (nextY * sampleWidth + x) * 4
+      const depthNorm = (255 - lum) / 255
+      const depth = 1.0 + depthNorm * 3.5
+
+      const ndcX = px / SAMPLE_W - 0.5
+      const ndcY = 0.5 - py / SAMPLE_H
+      const vx = ndcX * 2 * TAN_HALF_H * depth
+      const vy = ndcY * 2 * TAN_HALF_V * depth
+      const vz = -depth
+
+      const nextPx = Math.min(px + 1, SAMPLE_W - 1)
+      const nextPy = Math.min(py + 1, SAMPLE_H - 1)
+      const iX = (py * SAMPLE_W + nextPx) * 4
+      const iY = (nextPy * SAMPLE_W + px) * 4
       const lumX = 0.2126 * data[iX] + 0.7152 * data[iX + 1] + 0.0722 * data[iX + 2]
       const lumY = 0.2126 * data[iY] + 0.7152 * data[iY + 1] + 0.0722 * data[iY + 2]
-      const contrast = Math.min(Math.abs(lumX - luminance) + Math.abs(lumY - luminance), 255)
+      const contrast = Math.min(Math.abs(lumX - lum) + Math.abs(lumY - lum), 255) / 255
 
-      const xNorm = x / sampleWidth - 0.5
-      const yNorm = 0.5 - y / sampleHeight
-
-      const estimatedDepth = (255 - luminance) / 255
-      const contrastBoost = contrast / 255
-      const z = estimatedDepth * 3.4 + contrastBoost * 1.2 + frameWave
-
-      positions.push(xNorm * 6.4, yNorm * 3.6, z)
-
-      const colorDepth = 1 - estimatedDepth
-      const cr = colorDepth
-      const cg = 0.35 + contrastBoost * 0.45
-      const cb = estimatedDepth
-      colors.push(cr, cg, cb)
-
-      overlayPts.push({ x, y, r: cr, g: cg, b: cb, depth: estimatedDepth })
+      frameViewPts.push({
+        px, py, vx, vy, vz,
+        cr: 1 - depthNorm,
+        cg: 0.35 + contrast * 0.45,
+        cb: depthNorm,
+        depth: depthNorm
+      })
     }
   }
+}
 
-  lastOverlayPoints = overlayPts
-  lastFrameGray = extractGrayscale(data, sampleWidth, sampleHeight)
-  if (markers.value.length > 0) {
-    trackMarkers(lastFrameGray)
+function captureSnapshot() {
+  if (frameViewPts.length === 0) return
+
+  const rot = viewToWorldMatrix()
+  const v = new THREE.Vector3()
+
+  const currentCount = accPositions.length / 3
+  if (currentCount + frameViewPts.length > MAX_WORLD_POINTS) {
+    const remove = Math.min(currentCount, Math.floor(MAX_WORLD_POINTS * 0.15)) * 3
+    accPositions.splice(0, remove)
+    accColors.splice(0, remove)
   }
-  updatePointCloud(positions, colors)
-  statusMessage.value = `Scanning in progress (${pointCount.value} xyz points)`
+
+  for (const pt of frameViewPts) {
+    v.set(pt.vx, pt.vy, pt.vz)
+    v.applyMatrix4(rot)
+    accPositions.push(v.x, v.y, v.z)
+    accColors.push(pt.cr, pt.cg, pt.cb)
+  }
+
+  captureCount.value++
+  lastCaptureYaw = currentYaw()
+  syncCloudToScene()
+  statusMessage.value = `Capture #${captureCount.value} — ${pointCount.value} world points`
 }
 
 function drawOverlay() {
   const video = videoRef.value
   const canvas = overlayCanvasRef.value
-  if (!video || !canvas || video.videoWidth === 0) {
-    return
-  }
+  if (!video || !canvas || video.videoWidth === 0) return
 
-  const displayW = canvas.clientWidth
-  const displayH = canvas.clientHeight
-  if (canvas.width !== displayW || canvas.height !== displayH) {
-    canvas.width = displayW
-    canvas.height = displayH
+  const dw = canvas.clientWidth
+  const dh = canvas.clientHeight
+  if (canvas.width !== dw || canvas.height !== dh) {
+    canvas.width = dw
+    canvas.height = dh
   }
 
   const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    return
-  }
+  if (!ctx) return
 
-  ctx.drawImage(video, 0, 0, displayW, displayH)
+  ctx.drawImage(video, 0, 0, dw, dh)
 
-  const sampleWidth = 160
-  const sampleHeight = 120
-  const scaleX = displayW / sampleWidth
-  const scaleY = displayH / sampleHeight
+  const scaleX = dw / SAMPLE_W
+  const scaleY = dh / SAMPLE_H
   const dotSize = Math.max(2, Math.min(scaleX, scaleY) * 1.6)
 
-  for (const pt of lastOverlayPoints) {
-    const px = pt.x * scaleX
-    const py = pt.y * scaleY
-    const alpha = 0.35 + pt.depth * 0.55
-    const ri = Math.round(pt.r * 255)
-    const gi = Math.round(pt.g * 255)
-    const bi = Math.round(pt.b * 255)
-    ctx.fillStyle = `rgba(${ri},${gi},${bi},${alpha.toFixed(2)})`
+  // Draw current-frame overlay points
+  for (const pt of frameViewPts) {
+    const sx = pt.px * scaleX
+    const sy = pt.py * scaleY
+    const alpha = 0.3 + pt.depth * 0.5
+    ctx.fillStyle = `rgba(${Math.round(pt.cr * 255)},${Math.round(pt.cg * 255)},${Math.round(pt.cb * 255)},${alpha.toFixed(2)})`
     ctx.beginPath()
-    ctx.arc(px, py, dotSize, 0, Math.PI * 2)
+    ctx.arc(sx, sy, dotSize, 0, Math.PI * 2)
     ctx.fill()
   }
 
-  // Draw markers on overlay
+  // Draw markers re-projected from world space
   for (const mk of markers.value) {
-    const mx = mk.sx * scaleX
-    const my = mk.sy * scaleY
+    const proj = projectWorldToScreen(mk.wx, mk.wy, mk.wz, dw, dh)
     const radius = Math.max(8, dotSize * 4)
 
-    if (mk.lost) {
-      // Draw lost marker with dashed ring
-      ctx.setLineDash([4, 4])
-      ctx.strokeStyle = 'rgba(255,80,80,0.6)'
-      ctx.lineWidth = 2
-      ctx.beginPath()
-      ctx.arc(mx, my, radius, 0, Math.PI * 2)
-      ctx.stroke()
-      ctx.setLineDash([])
+    if (!proj.visible) continue
 
-      ctx.font = `bold ${Math.max(11, radius * 0.8)}px sans-serif`
-      ctx.fillStyle = 'rgba(255,120,120,0.8)'
-      ctx.fillText(`${mk.label} (lost)`, mx + radius + 4, my)
-      continue
-    }
+    const mx = proj.sx
+    const my = proj.sy
 
     // Outer ring
     ctx.strokeStyle = '#ffffff'
@@ -410,7 +373,7 @@ function drawOverlay() {
     ctx.font = `${Math.max(10, radius * 0.7)}px monospace`
     ctx.fillStyle = '#b0d0e8'
     ctx.fillText(
-      `(${mk.x3d.toFixed(2)}, ${mk.y3d.toFixed(2)}, ${mk.z3d.toFixed(2)})`,
+      `(${mk.wx.toFixed(2)}, ${mk.wy.toFixed(2)}, ${mk.wz.toFixed(2)})`,
       mx + radius + 4,
       my + radius * 0.6
     )
@@ -418,11 +381,17 @@ function drawOverlay() {
 }
 
 function scanLoop() {
-  if (!scanning.value) {
-    return
+  if (!scanning.value) return
+
+  processFrame()
+
+  // Auto-capture when yaw changes enough
+  const yawDelta = Math.abs(currentYaw() - lastCaptureYaw)
+  const normalizedDelta = Math.min(yawDelta, 2 * Math.PI - yawDelta)
+  if (normalizedDelta >= AUTO_CAPTURE_ANGLE || lastCaptureYaw === -999) {
+    captureSnapshot()
   }
 
-  sampleRoomToPointCloud()
   drawOverlay()
   scannerRafId = requestAnimationFrame(scanLoop)
 }
@@ -487,7 +456,8 @@ function startScan() {
   }
 
   scanning.value = true
-  statusMessage.value = 'Preparing room scan...'
+  lastCaptureYaw = -999
+  statusMessage.value = 'Scanning — rotate slowly around you...'
   scanLoop()
 }
 
@@ -497,86 +467,54 @@ function stopScan() {
     cancelAnimationFrame(scannerRafId)
     scannerRafId = 0
   }
-  statusMessage.value = 'Scan paused'
+  statusMessage.value = `Scan paused — ${captureCount.value} captures, ${pointCount.value} points`
 }
 
 function onOverlayClick(event: MouseEvent) {
   const canvas = overlayCanvasRef.value
-  if (!canvas || lastOverlayPoints.length === 0) {
-    return
-  }
+  if (!canvas || frameViewPts.length === 0) return
 
   const rect = canvas.getBoundingClientRect()
   const clickX = event.clientX - rect.left
   const clickY = event.clientY - rect.top
+  const scaleX = canvas.clientWidth / SAMPLE_W
+  const scaleY = canvas.clientHeight / SAMPLE_H
 
-  const sampleWidth = 160
-  const sampleHeight = 120
-  const scaleX = canvas.clientWidth / sampleWidth
-  const scaleY = canvas.clientHeight / sampleHeight
-
-  // Find nearest scanned point to click position
+  // Find nearest frame point to click
   let bestDist = Infinity
-  let bestPt = lastOverlayPoints[0]
-  for (const pt of lastOverlayPoints) {
-    const dx = pt.x * scaleX - clickX
-    const dy = pt.y * scaleY - clickY
+  let bestPt = frameViewPts[0]
+  for (const pt of frameViewPts) {
+    const dx = pt.px * scaleX - clickX
+    const dy = pt.py * scaleY - clickY
     const d = dx * dx + dy * dy
-    if (d < bestDist) {
-      bestDist = d
-      bestPt = pt
-    }
+    if (d < bestDist) { bestDist = d; bestPt = pt }
   }
 
-  // Capture template patch for tracking
-  if (!lastFrameGray) {
-    return
-  }
-  const patchCx = Math.round(bestPt.x)
-  const patchCy = Math.round(bestPt.y)
-  const patch = extractPatch(lastFrameGray, patchCx, patchCy, PATCH_HALF, SAMPLE_W, SAMPLE_H)
-  const patchSize = 2 * PATCH_HALF + 1
-
-  // Compute 3D coordinates using the same logic as sampleRoomToPointCloud
-  const xNorm = bestPt.x / sampleWidth - 0.5
-  const yNorm = 0.5 - bestPt.y / sampleHeight
-  const estimatedDepth = bestPt.depth
-  const contrastBoost = (bestPt.g - 0.35) / 0.45  // reverse from color encoding
-  const frameWave = Math.sin(frameCount.value * 0.09) * 0.18
-  const z3d = estimatedDepth * 3.4 + Math.max(0, contrastBoost) * 1.2 + frameWave
-  const x3d = xNorm * 6.4
-  const y3d = yNorm * 3.6
+  // Convert view-space point to world-space (fixed anchor)
+  const rot = viewToWorldMatrix()
+  const worldPt = new THREE.Vector3(bestPt.vx, bestPt.vy, bestPt.vz).applyMatrix4(rot)
 
   const id = nextMarkerId++
   const marker: Marker = {
     id,
-    sx: bestPt.x,
-    sy: bestPt.y,
-    x3d,
-    y3d,
-    z3d,
-    label: `M${id}`,
-    patch,
-    patchSize,
-    lost: false
+    wx: worldPt.x,
+    wy: worldPt.y,
+    wz: worldPt.z,
+    label: `M${id}`
   }
   markers.value.push(marker)
-
-  // Add 3D sphere in scene
   addMarker3D(marker)
-  statusMessage.value = `Marker ${marker.label} placed at (${x3d.toFixed(2)}, ${y3d.toFixed(2)}, ${z3d.toFixed(2)})`
+  statusMessage.value = `Marker ${marker.label} placed at (${marker.wx.toFixed(2)}, ${marker.wy.toFixed(2)}, ${marker.wz.toFixed(2)})`
 }
 
 function addMarker3D(marker: Marker) {
   const state = sceneState.value
-  if (!state) {
-    return
-  }
+  if (!state) return
 
   const geo = new THREE.SphereGeometry(0.09, 16, 16)
   const mat = new THREE.MeshStandardMaterial({ color: 0xff3055, emissive: 0xff1030, emissiveIntensity: 0.5 })
   const mesh = new THREE.Mesh(geo, mat)
-  mesh.position.set(marker.x3d, marker.y3d, marker.z3d)
+  mesh.position.set(marker.wx, marker.wy, marker.wz)
   mesh.name = `marker-${marker.id}`
   state.scene.add(mesh)
   markerMeshes.push(mesh)
@@ -614,11 +552,19 @@ function clearMarkers() {
   nextMarkerId = 1
 }
 
+function manualCapture() {
+  if (frameViewPts.length === 0) return
+  captureSnapshot()
+}
+
 function resetCloud() {
-  updatePointCloud([], [])
-  frameCount.value = 0
+  accPositions = []
+  accColors = []
+  syncCloudToScene()
+  captureCount.value = 0
+  lastCaptureYaw = -999
   clearMarkers()
-  statusMessage.value = cameraActive.value ? 'Point cloud reset' : 'Camera is off'
+  statusMessage.value = cameraActive.value ? 'Cloud reset — ready to scan again' : 'Camera is off'
 }
 
 onMounted(async () => {
@@ -626,10 +572,12 @@ onMounted(async () => {
   createThreeScene()
   updateSize()
   window.addEventListener('resize', updateSize)
+  initOrientation()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateSize)
+  window.removeEventListener('deviceorientation', onDeviceOrientation, true)
   stopCamera()
 
   if (renderRafId) {
@@ -653,7 +601,7 @@ onBeforeUnmount(() => {
     <section class="panel controls">
       <h1>RoomScanner</h1>
       <p>
-        Open camera, scan your room, and generate an estimated 3D xyz point cloud.
+        Open camera, rotate slowly to build a 3D room model, and place markers on objects.
       </p>
 
       <div class="actions">
@@ -669,6 +617,9 @@ onBeforeUnmount(() => {
         <button class="btn" type="button" @click="stopScan" :disabled="!scanning">
           Stop Scan
         </button>
+        <button class="btn primary" type="button" @click="manualCapture" :disabled="!scanning">
+          Capture
+        </button>
         <button class="btn" type="button" @click="resetCloud">
           Reset Cloud
         </button>
@@ -677,13 +628,23 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
+      <div v-if="!hasGyro && scanning" class="yaw-control">
+        <label>Manual Yaw (rotation): {{ manualYaw }}°</label>
+        <input type="range" min="0" max="360" step="1" v-model.number="manualYaw" />
+        <small>No gyroscope detected. Use this slider to simulate rotation.</small>
+      </div>
+
       <div class="status-grid">
         <span>Status</span>
         <strong>{{ statusMessage }}</strong>
         <span>Points</span>
         <strong>{{ pointCount }}</strong>
+        <span>Captures</span>
+        <strong>{{ captureCount }}</strong>
         <span>Markers</span>
         <strong>{{ markers.length }}</strong>
+        <span>Gyro</span>
+        <strong>{{ hasGyro ? 'Active' : 'Manual' }}</strong>
         <span>Axes</span>
         <strong>X (red), Y (green), Z (blue)</strong>
       </div>
@@ -693,7 +654,7 @@ onBeforeUnmount(() => {
           <span class="marker-dot"></span>
           <span class="marker-label">{{ mk.label }}</span>
           <span class="marker-coords">
-            ({{ mk.x3d.toFixed(2) }}, {{ mk.y3d.toFixed(2) }}, {{ mk.z3d.toFixed(2) }})
+            ({{ mk.wx.toFixed(2) }}, {{ mk.wy.toFixed(2) }}, {{ mk.wz.toFixed(2) }})
           </span>
           <button class="marker-remove" type="button" @click="removeMarker(mk.id)" title="Remove marker">&times;</button>
         </div>
@@ -706,7 +667,7 @@ onBeforeUnmount(() => {
     <section class="panel viewer">
       <div ref="sceneContainerRef" class="scene-host"></div>
       <small>
-        XYZ output is an estimated monocular depth map, useful as a lightweight room reconstruction preview.
+        Accumulated 3D room reconstruction. Rotate slowly to build the model.
       </small>
     </section>
 
@@ -719,7 +680,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <small>
-        Click on the overlay to place a marker. Points are drawn on top of the camera feed.
+        Click to place a marker. Markers stay fixed in world space as you move.
       </small>
     </section>
   </main>
@@ -819,6 +780,29 @@ video {
 
 .hidden-canvas {
   display: none;
+}
+
+.yaw-control {
+  margin: 0.5rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.yaw-control label {
+  font-size: 0.9rem;
+  color: #b9cbda;
+}
+
+.yaw-control input[type="range"] {
+  width: 100%;
+  accent-color: #3a8cc2;
+}
+
+.yaw-control small {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #7ea0b8;
 }
 
 .marker-list {
