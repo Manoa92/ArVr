@@ -5,33 +5,29 @@ import * as THREE from 'three'
 // ===== TYPES =====
 interface ScanPoint {
   position: THREE.Vector3
-  normal: THREE.Vector3
   color: THREE.Color
+  timestamp: number
 }
 
-interface UserPosition {
-  x: number
-  y: number
-  z: number
+interface RoomBounds {
+  min: THREE.Vector3
+  max: THREE.Vector3
 }
 
 // ===== REFS =====
 const canvasContainer = ref<HTMLDivElement>()
 const minimapCanvas = ref<HTMLCanvasElement>()
-const videoElement = ref<HTMLVideoElement>()
-const overlayCanvas = ref<HTMLCanvasElement>()
 
 // États
 const isXRSupported = ref(false)
 const isXRActive = ref(false)
 const isScanning = ref(false)
 const scanPoints = ref<ScanPoint[]>([])
-const userPosition = ref<UserPosition>({ x: 0, y: 0, z: 0 })
+const userPosition = ref({ x: 0, y: 1.6, z: 0 }) // Position debout
 const xrMessage = ref('')
 const fps = ref(0)
 const isSidebarOpen = ref(true)
-const isVideoPopupOpen = ref(false)
-const lastXRPosition = ref<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 })
+const roomBounds = ref<RoomBounds>({ min: new THREE.Vector3(), max: new THREE.Vector3() })
 
 // Three.js objets
 let scene: THREE.Scene
@@ -39,17 +35,15 @@ let camera: THREE.PerspectiveCamera
 let renderer: THREE.WebGLRenderer
 let animationId: number
 let minimapCtx: CanvasRenderingContext2D | null = null
-let overlayCtx: CanvasRenderingContext2D | null = null
 
 // WebXR
 let xrSession: XRSession | null = null
 let xrReferenceSpace: XRReferenceSpace | null = null
-let xrFrame: XRFrame | null = null
 
 // Scanning
-let scannedMesh: THREE.Mesh | null = null
 let pointsMesh: THREE.Points | null = null
 let scanInterval: number | null = null
+let lastScanTime = 0
 
 let stream: MediaStream | null = null
 let lastFrameTime = Date.now()
@@ -79,11 +73,6 @@ onMounted(async () => {
     minimapCtx = minimapCanvas.value.getContext('2d')
   }
 
-  // Setup overlay canvas
-  if (overlayCanvas.value) {
-    overlayCtx = overlayCanvas.value.getContext('2d')
-  }
-
   // Lancer animation
   animate()
 
@@ -93,7 +82,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopXR()
-  stopCamera()
   cancelAnimationFrame(animationId)
   if (scanInterval) clearInterval(scanInterval)
   window.removeEventListener('resize', onWindowResize)
@@ -109,263 +97,111 @@ function setupThreeJS() {
   // Scene
   scene = new THREE.Scene()
   scene.background = new THREE.Color(0x1a1a2e)
-  scene.fog = new THREE.Fog(0x1a1a2e, 50, 100)
 
   // Camera
-  camera = new THREE.PerspectiveCamera(75, width / height, 0.01, 1000)
-  camera.position.set(5, 2, 5)
+  camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000)
+  camera.position.set(0, 1.6, 5)
   camera.lookAt(0, 1, 0)
 
   // Renderer
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+  renderer = new THREE.WebGLRenderer({ antialias: true })
   renderer.setSize(width, height)
-  renderer.setPixelRatio(window.devicePixelRatio)
   renderer.shadowMap.enabled = true
   canvasContainer.value.appendChild(renderer.domElement)
 
   // Lighting
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.7)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
   scene.add(ambientLight)
 
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.9)
-  directionalLight.position.set(10, 10, 10)
-  directionalLight.castShadow = true
-  directionalLight.shadow.mapSize.width = 2048
-  directionalLight.shadow.mapSize.height = 2048
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
+  directionalLight.position.set(5, 5, 5)
   scene.add(directionalLight)
 
-  // Axes
-  const axesHelper = new THREE.AxesHelper(5)
-  scene.add(axesHelper)
-
-  // Sol
-  const floorGeometry = new THREE.PlaneGeometry(20, 20)
-  const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.1, roughness: 0.8 })
-  const floor = new THREE.Mesh(floorGeometry, floorMaterial)
-  floor.rotation.x = -Math.PI / 2
-  floor.position.y = 0
-  scene.add(floor)
-
-  // Grille
+  // Sol avec grille
   const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222)
-  gridHelper.position.y = 0.01
   scene.add(gridHelper)
 
-  // User position marker
-  const userGeometry = new THREE.SphereGeometry(0.25, 32, 32)
-  const userMaterial = new THREE.MeshStandardMaterial({ color: 0xff6600, emissive: 0xff6600 })
-  const userMarker = new THREE.Mesh(userGeometry, userMaterial)
-  userMarker.position.set(0, 0.25, 0)
+  // Marker position utilisateur
+  const userMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.1, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xff0000 })
+  )
+  userMarker.position.set(userPosition.value.x, userPosition.value.y, userPosition.value.z)
   scene.add(userMarker)
 
-  // Points cloud placeholder
-  const pointsGeometry = new THREE.BufferGeometry()
-  pointsGeometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3))
-  pointsGeometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3))
-  
-  const pointsMaterial = new THREE.PointsMaterial({
+  // Points cloud setup
+  setupPointsCloud()
+}
+
+// ===== POINTS CLOUD =====
+function setupPointsCloud() {
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3))
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3))
+
+  const material = new THREE.PointsMaterial({
     size: 0.05,
     sizeAttenuation: true,
     vertexColors: true,
     transparent: true,
     opacity: 0.8
   })
-  pointsMesh = new THREE.Points(pointsGeometry, pointsMaterial)
+
+  pointsMesh = new THREE.Points(geometry, material)
   scene.add(pointsMesh)
-
-  // Room placeholder
-  const roomGeometry = new THREE.BoxGeometry(8, 3, 8)
-  const roomMaterial = new THREE.MeshStandardMaterial({
-    color: 0x4a4a6a,
-    transparent: true,
-    opacity: 0.1,
-    wireframe: false
-  })
-  scannedMesh = new THREE.Mesh(roomGeometry, roomMaterial)
-  scannedMesh.position.y = 1.5
-  scene.add(scannedMesh)
-
-  // Wireframe
-  const edges = new THREE.EdgesGeometry(roomGeometry)
-  const wireframe = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 }))
-  wireframe.position.copy(scannedMesh.position)
-  scene.add(wireframe)
 }
 
-// ===== CAMERA CONTROL =====
-async function startCamera() {
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' }, // Caméra arrière
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      }
-    })
-    if (videoElement.value) {
-      videoElement.value.srcObject = stream
-    }
-  } catch (error) {
-    console.error('Erreur caméra:', error)
-    xrMessage.value = '❌ Impossible d\'accéder à la caméra'
-  }
-}
+// ===== SCANNING FUNCTIONS =====
+function startScan() {
+  if (isScanning.value) return
 
-function stopCamera() {
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop())
-    stream = null
-  }
-  if (videoElement.value) {
-    videoElement.value.srcObject = null
-  }
-}
-
-// ===== WebXR AR =====
-async function startXR() {
-  if (!isXRSupported.value) {
-    xrMessage.value = '❌ WebXR non supporté'
-    return
-  }
-
-  try {
-    const xr = (navigator as any).xr
-    xrSession = await xr.requestSession('immersive-ar', {
-      requiredFeatures: ['hit-test', 'dom-overlay'],
-      optionalFeatures: ['depth-sensing', 'dom-overlay-for-handheld-ar'],
-      domOverlay: { root: document.body }
-    })
-
-    if (xrSession) {
-      xrReferenceSpace = await xrSession.requestReferenceSpace('local')
-    }
-
-    renderer.xr.enabled = true
-    renderer.xr.setSession(xrSession)
-
-    isXRActive.value = true
-    xrMessage.value = '✅ Mode AR activé'
-
-    // Commencer le scan
-    startXRScan()
-  } catch (error) {
-    console.error('Erreur XR:', error)
-    xrMessage.value = `❌ Erreur AR: ${(error as Error).message}`
-  }
-}
-
-function stopXR() {
-  if (xrSession) {
-    xrSession.end()
-    xrSession = null
-  }
-  isXRActive.value = false
-  xrMessage.value = 'Mode AR arrêté'
-  stopXRScan()
-  renderer.xr.enabled = false
-}
-
-function startXRScan() {
   isScanning.value = true
-  xrMessage.value = '🔄 Scanning... Déplacez autour de la pièce'
+  xrMessage.value = '🔄 Scanning en cours...'
 
   scanInterval = window.setInterval(() => {
-    if (!xrFrame || !xrReferenceSpace) return
-
-    try {
-      const pose = xrFrame.getViewerPose(xrReferenceSpace)
-      if (pose) {
-        // Position utilisateur
-        userPosition.value = {
-          x: pose.transform.position.x,
-          y: pose.transform.position.y,
-          z: pose.transform.position.z
-        }
-        lastXRPosition.value = { ...userPosition.value }
-      }
-
-      // Générer des points de scan
-      if (Math.random() < 0.3) {
-        const angle = Math.random() * Math.PI * 2
-        const distance = 2 + Math.random() * 3
-        const point: ScanPoint = {
-          position: new THREE.Vector3(
-            Math.cos(angle) * distance + userPosition.value.x,
-            0.5 + Math.random() * 2,
-            Math.sin(angle) * distance + userPosition.value.z
-          ),
-          normal: new THREE.Vector3(0, 1, 0),
-          color: new THREE.Color().setHSL(Math.random(), 0.7, 0.6)
-        }
-        scanPoints.value.push(point)
-      }
-
-      updatePointsVisualization()
-    } catch (error) {
-      console.error('Erreur scan XR:', error)
-    }
+    addScanPoints()
+    updatePointsVisualization()
+    updateRoomBounds()
   }, 100)
 }
 
-function stopXRScan() {
+function stopScan() {
   isScanning.value = false
   if (scanInterval) {
     clearInterval(scanInterval)
     scanInterval = null
   }
+  xrMessage.value = `✅ Scan terminé - ${scanPoints.value.length} points`
 }
 
-// ===== SCANNING =====
-function startManualScan() {
-  isScanning.value = true
-  xrMessage.value = '🔄 Scanning manual en cours...'
+function addScanPoints() {
+  const now = Date.now()
+  if (now - lastScanTime < 50) return // Limite la fréquence
 
-  // Simuler scanning avec déplacement dans la scène
-  scanInterval = window.setInterval(() => {
-    // Ajouter des points aléatoires autour de la position utilisateur
-    let newPoints = 5
-    for (let i = 0; i < newPoints; i++) {
-      const angle = Math.random() * Math.PI * 2
-      const distance = 1.5 + Math.random() * 4
-      const height = Math.random() * 2.5
+  lastScanTime = now
 
-      const point: ScanPoint = {
-        position: new THREE.Vector3(
-          Math.cos(angle) * distance + userPosition.value.x,
-          height,
-          Math.sin(angle) * distance + userPosition.value.z
-        ),
-        normal: new THREE.Vector3(0, 1, 0),
-        color: new THREE.Color().setHSL(Math.random() * 0.3, 0.8, 0.6) // Teintes vertes/bleues
-      }
-      scanPoints.value.push(point)
+  // Générer des points autour de la position utilisateur
+  const numPoints = 3
+  for (let i = 0; i < numPoints; i++) {
+    // Distance et angle aléatoires
+    const distance = 0.5 + Math.random() * 3
+    const angle = Math.random() * Math.PI * 2
+    const height = Math.random() * 2.5
+
+    const point: ScanPoint = {
+      position: new THREE.Vector3(
+        userPosition.value.x + Math.cos(angle) * distance,
+        height,
+        userPosition.value.z + Math.sin(angle) * distance
+      ),
+      color: new THREE.Color().setHSL(Math.random(), 0.7, 0.6),
+      timestamp: now
     }
-    updatePointsVisualization()
-  }, 200)
-}
 
-function stopManualScan() {
-  isScanning.value = false
-  if (scanInterval) {
-    clearInterval(scanInterval)
-    scanInterval = null
+    scanPoints.value.push(point)
   }
-  xrMessage.value = '✅ Scanning stoppé'
 }
 
-function clearScan() {
-  scanPoints.value = []
-  if (pointsMesh) {
-    pointsMesh.geometry.dispose()
-    const newGeom = new THREE.BufferGeometry()
-    newGeom.setAttribute('position', new THREE.Float32BufferAttribute([], 3))
-    newGeom.setAttribute('color', new THREE.Float32BufferAttribute([], 3))
-    pointsMesh.geometry = newGeom
-  }
-  xrMessage.value = '🗑️ Scan effacé'
-}
-
-// ===== VISUALIZATION =====
 function updatePointsVisualization() {
   if (!pointsMesh) return
 
@@ -388,106 +224,53 @@ function updatePointsVisualization() {
   pointsMesh.geometry.attributes.color.needsUpdate = true
 }
 
-function updateOverlayCanvas() {
-  if (!overlayCtx || !overlayCanvas.value || !isVideoPopupOpen.value) return
+function updateRoomBounds() {
+  if (scanPoints.value.length === 0) return
 
-  const canvas = overlayCanvas.value
-  const ctx = overlayCtx
-
-  // Clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-  // Set canvas size to match video
-  if (videoElement.value) {
-    canvas.width = videoElement.value.videoWidth || 640
-    canvas.height = videoElement.value.videoHeight || 480
-  }
-
-  // Only draw points if scanning
-  if (!isScanning.value || scanPoints.value.length === 0) return
-
-  // Project 3D points to 2D screen coordinates
-  const cameraMatrix = camera.matrixWorldInverse
-  const projectionMatrix = camera.projectionMatrix
-  const viewProjectionMatrix = new THREE.Matrix4().multiplyMatrices(projectionMatrix, cameraMatrix)
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity)
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity)
 
   scanPoints.value.forEach(point => {
-    const worldPos = new THREE.Vector3(point.position.x, point.position.y, point.position.z)
-    const screenPos = worldPos.clone()
-    screenPos.applyMatrix4(viewProjectionMatrix)
-
-    // Convert from NDC (-1 to 1) to screen coordinates
-    const x = (screenPos.x + 1) * canvas.width / 2
-    const y = (-screenPos.y + 1) * canvas.height / 2
-
-    // Only draw if point is in front of camera and within screen bounds
-    if (screenPos.z > 0 && x >= 0 && x <= canvas.width && y >= 0 && y <= canvas.height) {
-      ctx.fillStyle = `rgba(${Math.floor(point.color.r * 255)}, ${Math.floor(point.color.g * 255)}, ${Math.floor(point.color.b * 255)}, 0.8)`
-      ctx.beginPath()
-      ctx.arc(x, y, 4, 0, Math.PI * 2)
-      ctx.fill()
-    }
+    min.min(point.position)
+    max.max(point.position)
   })
+
+  roomBounds.value = { min, max }
 }
 
-function updateMinimap() {
-  if (!minimapCtx || !minimapCanvas.value) return
+function clearScan() {
+  scanPoints.value = []
+  updatePointsVisualization()
+  roomBounds.value = { min: new THREE.Vector3(), max: new THREE.Vector3() }
+  xrMessage.value = '🗑️ Scan effacé'
+}
 
-  const w = minimapCanvas.value.width
-  const h = minimapCanvas.value.height
-  const scale = 0.05 // pixels per meter
+// ===== MOVEMENT SIMULATION =====
+function moveForward() {
+  userPosition.value.z -= 0.5
+  updateUserMarker()
+}
 
-  // Fond
-  minimapCtx.fillStyle = '#1a1a2e'
-  minimapCtx.fillRect(0, 0, w, h)
+function moveBackward() {
+  userPosition.value.z += 0.5
+  updateUserMarker()
+}
 
-  // Grille
-  minimapCtx.strokeStyle = '#333'
-  minimapCtx.lineWidth = 1
-  for (let i = 0; i <= 20; i++) {
-    minimapCtx.beginPath()
-    minimapCtx.moveTo(i * (w / 20), 0)
-    minimapCtx.lineTo(i * (w / 20), h)
-    minimapCtx.stroke()
+function moveLeft() {
+  userPosition.value.x -= 0.5
+  updateUserMarker()
+}
 
-    minimapCtx.beginPath()
-    minimapCtx.moveTo(0, i * (h / 20))
-    minimapCtx.lineTo(w, i * (h / 20))
-    minimapCtx.stroke()
+function moveRight() {
+  userPosition.value.x += 0.5
+  updateUserMarker()
+}
+
+function updateUserMarker() {
+  const userMarker = scene.children.find(child => child.type === 'Mesh' && (child as THREE.Mesh).geometry.type === 'SphereGeometry')
+  if (userMarker) {
+    userMarker.position.set(userPosition.value.x, userPosition.value.y, userPosition.value.z)
   }
-
-  const centerX = w / 2
-  const centerY = h / 2
-
-  // Points scannés
-  minimapCtx.fillStyle = 'rgba(0, 255, 100, 0.6)'
-  scanPoints.value.slice(-500).forEach(point => {
-    const px = centerX + point.position.x * scale
-    const pz = centerY + point.position.z * scale
-    if (px > 0 && px < w && pz > 0 && pz < h && minimapCtx) {
-      minimapCtx.fillRect(px - 1, pz - 1, 2, 2)
-    }
-  })
-
-  // Position utilisateur
-  minimapCtx.fillStyle = '#ff6600'
-  minimapCtx.beginPath()
-  minimapCtx.arc(centerX, centerY, 8, 0, Math.PI * 2)
-  minimapCtx.fill()
-
-  // Direction utilisateur
-  minimapCtx.strokeStyle = '#ffaa44'
-  minimapCtx.lineWidth = 2
-  minimapCtx.beginPath()
-  minimapCtx.moveTo(centerX, centerY)
-  minimapCtx.lineTo(centerX, centerY - 15)
-  minimapCtx.stroke()
-
-  // Texte info
-  minimapCtx.fillStyle = '#0f0'
-  minimapCtx.font = '12px monospace'
-  minimapCtx.fillText(`Pts: ${scanPoints.value.length}`, 5, 15)
-  minimapCtx.fillText(`Pos: (${userPosition.value.x.toFixed(1)}, ${userPosition.value.z.toFixed(1)})`, 5, 30)
 }
 
 // ===== ANIMATION =====
@@ -504,7 +287,6 @@ function animate() {
   }
 
   updateMinimap()
-  updateOverlayCanvas() // Update overlay even when not scanning for smooth visuals
   renderer.render(scene, camera)
 }
 
@@ -516,25 +298,83 @@ function onWindowResize() {
   camera.updateProjectionMatrix()
   renderer.setSize(width, height)
 }
+
+// ===== MINIMAP =====
+function updateMinimap() {
+  if (!minimapCtx || !minimapCanvas.value) return
+
+  const canvas = minimapCanvas.value
+  const ctx = minimapCtx
+  const w = canvas.width
+  const h = canvas.height
+  const scale = 10 // pixels per meter
+
+  // Clear
+  ctx.fillStyle = '#1a1a2e'
+  ctx.fillRect(0, 0, w, h)
+
+  // Grid
+  ctx.strokeStyle = '#333'
+  ctx.lineWidth = 1
+  for (let i = 0; i <= 20; i++) {
+    ctx.beginPath()
+    ctx.moveTo(i * (w / 20), 0)
+    ctx.lineTo(i * (w / 20), h)
+    ctx.stroke()
+
+    ctx.beginPath()
+    ctx.moveTo(0, i * (h / 20))
+    ctx.lineTo(w, i * (h / 20))
+    ctx.stroke()
+  }
+
+  const centerX = w / 2
+  const centerY = h / 2
+
+  // Room bounds
+  if (scanPoints.value.length > 0) {
+    const bounds = roomBounds.value
+    const width = (bounds.max.x - bounds.min.x) * scale
+    const height = (bounds.max.z - bounds.min.z) * scale
+    const x = centerX + bounds.min.x * scale
+    const y = centerY + bounds.min.z * scale
+
+    ctx.strokeStyle = '#00ff88'
+    ctx.lineWidth = 2
+    ctx.strokeRect(x, y, width, height)
+  }
+
+  // Scan points
+  ctx.fillStyle = 'rgba(0, 255, 136, 0.6)'
+  scanPoints.value.forEach(point => {
+    const px = centerX + point.position.x * scale
+    const pz = centerY + point.position.z * scale
+    if (px > 0 && px < w && pz > 0 && pz < h) {
+      ctx.fillRect(px - 1, pz - 1, 2, 2)
+    }
+  })
+
+  // User position
+  ctx.fillStyle = '#ff4444'
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, 6, 0, Math.PI * 2)
+  ctx.fill()
+
+  // Info text
+  ctx.fillStyle = '#0f0'
+  ctx.font = '12px monospace'
+  ctx.fillText(`Points: ${scanPoints.value.length}`, 5, 15)
+  ctx.fillText(`Pos: (${userPosition.value.x.toFixed(1)}, ${userPosition.value.z.toFixed(1)})`, 5, 30)
+}
 </script>
 
 <template>
   <div class="room-scanner-container">
     <!-- Header -->
     <div class="header">
-      <div class="header-row">
-        <h1>🏠 Room Scanner 3D + GPS Intérieur</h1>
-        <div class="header-actions">
-          <button @click="isSidebarOpen = !isSidebarOpen" class="btn btn-secondary small">
-            {{ isSidebarOpen ? 'Fermer menu' : 'Ouvrir menu' }}
-          </button>
-          <button @click="isVideoPopupOpen = !isVideoPopupOpen" class="btn btn-primary small">
-            {{ isVideoPopupOpen ? 'Fermer vidéo' : 'Voir vidéo' }}
-          </button>
-        </div>
-      </div>
+      <h1>🏠 Room Scanner 3D</h1>
       <div class="info-bar">
-        <span :class="['xr-status', { supported: isXRSupported }]">{{ xrMessage }}</span>
+        <span :class="['status', { scanning: isScanning }]">{{ xrMessage }}</span>
         <span class="fps-counter">FPS: {{ fps }}</span>
       </div>
     </div>
@@ -545,65 +385,75 @@ function onWindowResize() {
       <div class="viewer-section">
         <div ref="canvasContainer" class="canvas-container"></div>
       </div>
-    </div>
 
-    <aside class="sidebar" :class="{ open: isSidebarOpen }">
-      <div class="sidebar-header">
-        <h3>📦 Menu</h3>
-        <button @click="isSidebarOpen = false" class="btn btn-icon">×</button>
-      </div>
-      <div class="sidebar-body">
-        <div class="minimap-section">
-          <h3>📍 GPS Intérieur</h3>
-          <canvas ref="minimapCanvas" width="300" height="300" class="minimap"></canvas>
-          <div class="position-info">
-            <p><strong>Position:</strong></p>
-            <p>X: {{ userPosition.x.toFixed(2) }} m</p>
-            <p>Y: {{ userPosition.y.toFixed(2) }} m</p>
-            <p>Z: {{ userPosition.z.toFixed(2) }} m</p>
-          </div>
+      <!-- Sidebar -->
+      <aside class="sidebar" :class="{ open: isSidebarOpen }">
+        <div class="sidebar-header">
+          <h3>📊 Contrôles</h3>
+          <button @click="isSidebarOpen = !isSidebarOpen" class="btn btn-icon">×</button>
         </div>
 
-        <div class="controls-panel">
-          <div class="control-group">
-            <h3>📹 Caméra & AR</h3>
-            <button @click="startCamera" class="btn btn-primary">Ouvrir Caméra</button>
-            <button @click="stopCamera" class="btn btn-secondary">Fermer Caméra</button>
-            <button @click="startXR" :disabled="!isXRSupported || isXRActive" class="btn btn-success">
-              Démarrer AR (WebXR)
-            </button>
-            <button @click="stopXR" :disabled="!isXRActive" class="btn btn-danger">Arrêter AR</button>
+        <div class="sidebar-body">
+          <!-- Minimap -->
+          <div class="minimap-section">
+            <h3>🗺️ Minimap</h3>
+            <canvas ref="minimapCanvas" width="300" height="300" class="minimap"></canvas>
+            <div class="position-info">
+              <p><strong>Position:</strong></p>
+              <p>X: {{ userPosition.x.toFixed(2) }} m</p>
+              <p>Y: {{ userPosition.y.toFixed(2) }} m</p>
+              <p>Z: {{ userPosition.z.toFixed(2) }} m</p>
+            </div>
           </div>
 
+          <!-- Movement Controls -->
+          <div class="control-group">
+            <h3>🚶 Mouvement</h3>
+            <div class="movement-controls">
+              <button @click="moveForward" class="btn btn-secondary">↑ Avant</button>
+              <div class="movement-row">
+                <button @click="moveLeft" class="btn btn-secondary">← Gauche</button>
+                <button @click="moveRight" class="btn btn-secondary">→ Droite</button>
+              </div>
+              <button @click="moveBackward" class="btn btn-secondary">↓ Arrière</button>
+            </div>
+          </div>
+
+          <!-- Scan Controls -->
           <div class="control-group">
             <h3>🔍 Scanning</h3>
-            <button @click="startManualScan" :disabled="isScanning" class="btn btn-primary">Démarrer Scan Manuel</button>
-            <button @click="stopManualScan" :disabled="!isScanning" class="btn btn-secondary">Arrêter Scan</button>
-            <button @click="clearScan" class="btn btn-warning">Effacer Points ({{ scanPoints.length }})</button>
+            <button @click="startScan" :disabled="isScanning" class="btn btn-primary">
+              ▶️ Démarrer Scan
+            </button>
+            <button @click="stopScan" :disabled="!isScanning" class="btn btn-secondary">
+              ⏹️ Arrêter Scan
+            </button>
+            <button @click="clearScan" class="btn btn-warning">
+              🗑️ Effacer ({{ scanPoints.length }} points)
+            </button>
+          </div>
+
+          <!-- Room Info -->
+          <div class="control-group">
+            <h3>🏠 Informations Pièce</h3>
+            <div class="room-info">
+              <p><strong>Points scannés:</strong> {{ scanPoints.length }}</p>
+              <p v-if="scanPoints.length > 0">
+                <strong>Dimensions:</strong><br>
+                L: {{ (roomBounds.max.x - roomBounds.min.x).toFixed(1) }}m<br>
+                P: {{ (roomBounds.max.z - roomBounds.min.z).toFixed(1) }}m<br>
+                H: {{ (roomBounds.max.y - roomBounds.min.y).toFixed(1) }}m
+              </p>
+            </div>
           </div>
         </div>
-      </div>
-    </aside>
-
-    <!-- Debug Info -->
-    <div class="debug-info">
-      <p><strong>Scan Points:</strong> {{ scanPoints.length }}</p>
-      <p><strong>XR Status:</strong> {{ isXRActive ? 'Actif' : 'Inactif' }}</p>
-      <p><strong>Scanning:</strong> {{ isScanning ? '🟢 En cours' : '🔴 Arrêté' }}</p>
+      </aside>
     </div>
 
-    <div v-if="isVideoPopupOpen" class="popup-overlay" @click.self="isVideoPopupOpen = false">
-      <div class="video-popup">
-        <div class="popup-header">
-          <h3>🔴 Vidéo Caméra</h3>
-          <button @click="isVideoPopupOpen = false" class="btn btn-icon">×</button>
-        </div>
-        <div class="video-container">
-          <video ref="videoElement" autoplay playsinline muted class="popup-video"></video>
-          <canvas ref="overlayCanvas" class="overlay-canvas"></canvas>
-        </div>
-      </div>
-    </div>
+    <!-- Toggle Sidebar Button -->
+    <button @click="isSidebarOpen = !isSidebarOpen" class="sidebar-toggle">
+      {{ isSidebarOpen ? '◁' : '▷' }}
+    </button>
   </div>
 </template>
 
@@ -619,77 +469,274 @@ function onWindowResize() {
   overflow: hidden;
 }
 
-/* ===== HEADER (Compact) ===== */
+/* ===== HEADER ===== */
 .header {
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-  padding: 8px 12px;
+  padding: 12px 16px;
   border-bottom: 2px solid #00ff88;
   flex-shrink: 0;
-  min-height: 50px;
 }
 
 .header h1 {
   margin: 0;
-  font-size: 16px;
+  font-size: 20px;
   background: linear-gradient(90deg, #00ff88, #00ccff);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .info-bar {
   display: flex;
-  gap: 12px;
-  margin-top: 4px;
-  font-size: 10px;
-  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 12px;
 }
 
-.xr-status {
-  padding: 2px 8px;
-  border-radius: 3px;
+.status {
+  padding: 4px 8px;
+  border-radius: 4px;
   background: #333;
-  border: 1px solid #555;
-  white-space: nowrap;
 }
 
-.xr-status.supported {
+.status.scanning {
+  background: #1a4a1a;
+  color: #00ff88;
+}
+
+.fps-counter {
+  color: #00ccff;
+}
+
+/* ===== MAIN CONTENT ===== */
+.main-content {
+  flex: 1;
+  display: flex;
+  position: relative;
+}
+
+.viewer-section {
+  flex: 1;
+  position: relative;
+}
+
+.canvas-container {
+  width: 100%;
+  height: 100%;
+}
+
+/* ===== SIDEBAR ===== */
+.sidebar {
+  width: 320px;
+  background: #1a1a2e;
+  border-left: 2px solid #333;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.3s ease;
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+}
+
+.sidebar.open {
+  transform: translateX(0);
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #333;
+  background: #0a0a0a;
+}
+
+.sidebar-header h3 {
+  margin: 0;
+  color: #00ff88;
+}
+
+.sidebar-body {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ===== MINIMAP ===== */
+.minimap-section h3 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  color: #00ff88;
+}
+
+.minimap {
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #0a0a0a;
+  width: 100%;
+  aspect-ratio: 1;
+}
+
+.position-info {
+  margin-top: 8px;
+  font-size: 11px;
+  background: #0a0a0a;
+  padding: 8px;
+  border-radius: 4px;
+  border: 1px solid #333;
+}
+
+.position-info p {
+  margin: 2px 0;
+  font-family: monospace;
+  color: #00ccff;
+}
+
+/* ===== CONTROLS ===== */
+.control-group {
+  background: #0a0a0a;
+  padding: 12px;
+  border-radius: 4px;
+  border: 1px solid #333;
+}
+
+.control-group h3 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  color: #00ff88;
+}
+
+.movement-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.movement-row {
+  display: flex;
+  gap: 8px;
+}
+
+.room-info {
+  font-size: 12px;
+  color: #ccc;
+}
+
+.room-info p {
+  margin: 4px 0;
+}
+
+/* ===== BUTTONS ===== */
+.btn {
+  padding: 8px 12px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: #2a2a3e;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+.btn:hover:not(:disabled) {
+  background: #3a3a4e;
+  border-color: #00ff88;
+}
+
+.btn-primary:not(:disabled) {
   background: #1a3a1a;
   border-color: #00ff88;
   color: #00ff88;
 }
 
-.fps-counter {
-  padding: 2px 8px;
-  background: #1a1a2a;
-  border-radius: 3px;
-  font-family: monospace;
-  color: #00ffff;
-  white-space: nowrap;
+.btn-primary:not(:disabled):hover {
+  background: #1a4a1a;
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.2);
 }
 
-/* ===== MAIN CONTENT (Flexbox) ===== */
-.main-content {
-  display: flex;
-  gap: 8px;
-  padding: 8px;
-  flex: 1;
-  overflow: hidden;
+.btn-secondary:not(:disabled) {
+  background: #3a1a1a;
+  border-color: #ff4444;
+  color: #ff8888;
 }
 
-.viewer-section {
-  background: #000;
-  border: 2px solid #333;
-  border-radius: 6px;
-  overflow: hidden;
-  flex: 1;
-  min-width: 0;
+.btn-secondary:not(:disabled):hover {
+  background: #4a1a1a;
 }
 
-.canvas-container {
+.btn-warning:not(:disabled) {
+  background: #4a4a1a;
+  border-color: #ffcc00;
+  color: #ffdd44;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: #1a1a1a;
+}
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  color: #ff4444;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.btn-icon:hover {
+  background: #4a1a1a;
+}
+
+/* ===== SIDEBAR TOGGLE ===== */
+.sidebar-toggle {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  background: #1a1a2e;
+  border: 2px solid #00ff88;
+  color: #00ff88;
+  font-size: 18px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  z-index: 5;
+  transition: all 0.3s;
+}
+
+.sidebar-toggle:hover {
+  background: #00ff88;
+  color: #1a1a2e;
+}
+
+/* ===== RESPONSIVE ===== */
+@media (max-width: 768px) {
+  .sidebar {
+    width: 280px;
+  }
+
+  .header h1 {
+    font-size: 16px;
+  }
+
+  .minimap {
+    width: 100%;
+    height: 200px;
+  }
+}
+</style>
   width: 100%;
   height: 100%;
 }
