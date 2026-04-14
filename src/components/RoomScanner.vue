@@ -1,928 +1,465 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import * as THREE from 'three'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
-// ===== TYPES =====
-interface ScanPoint {
-  position: THREE.Vector3
-  color: THREE.Color
-  timestamp: number
+const videoRef = ref<HTMLVideoElement | null>(null)
+const scannerCanvasRef = ref<HTMLCanvasElement | null>(null)
+const sceneContainerRef = ref<HTMLDivElement | null>(null)
+
+const cameraActive = ref(false)
+const scanning = ref(false)
+const statusMessage = ref('Camera is off')
+const pointCount = ref(0)
+const frameCount = ref(0)
+
+let mediaStream: MediaStream | null = null
+let scannerRafId = 0
+let renderRafId = 0
+
+const sceneState = shallowRef<{
+  scene: THREE.Scene
+  camera: THREE.PerspectiveCamera
+  renderer: THREE.WebGLRenderer
+  controls: OrbitControls
+  pointGeometry: THREE.BufferGeometry
+  pointMaterial: THREE.PointsMaterial
+  pointMesh: THREE.Points
+} | null>(null)
+
+const canScan = computed(() => cameraActive.value)
+
+function createThreeScene() {
+  const container = sceneContainerRef.value
+  if (!container) {
+    return
+  }
+
+  const scene = new THREE.Scene()
+  scene.background = new THREE.Color('#0b0f16')
+
+  const camera = new THREE.PerspectiveCamera(55, container.clientWidth / container.clientHeight, 0.1, 200)
+  camera.position.set(0, 1.4, 5)
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true })
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  renderer.setSize(container.clientWidth, container.clientHeight)
+  container.innerHTML = ''
+  container.appendChild(renderer.domElement)
+
+  const controls = new OrbitControls(camera, renderer.domElement)
+  controls.enableDamping = true
+  controls.maxDistance = 30
+  controls.minDistance = 0.8
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.45)
+  scene.add(ambient)
+
+  const directional = new THREE.DirectionalLight(0x9ac4ff, 1.15)
+  directional.position.set(2, 6, 3)
+  scene.add(directional)
+
+  scene.add(new THREE.GridHelper(14, 14, 0x4f7188, 0x1e3546))
+  scene.add(new THREE.AxesHelper(2.2))
+
+  const pointGeometry = new THREE.BufferGeometry()
+  const pointMaterial = new THREE.PointsMaterial({ size: 0.04, vertexColors: true })
+  const pointMesh = new THREE.Points(pointGeometry, pointMaterial)
+  scene.add(pointMesh)
+
+  sceneState.value = {
+    scene,
+    camera,
+    renderer,
+    controls,
+    pointGeometry,
+    pointMaterial,
+    pointMesh
+  }
+
+  const renderLoop = () => {
+    const state = sceneState.value
+    if (!state) {
+      return
+    }
+
+    state.controls.update()
+    state.renderer.render(state.scene, state.camera)
+    renderRafId = requestAnimationFrame(renderLoop)
+  }
+
+  renderLoop()
 }
 
-interface RoomBounds {
-  min: THREE.Vector3
-  max: THREE.Vector3
+function updateSize() {
+  const state = sceneState.value
+  const container = sceneContainerRef.value
+  if (!state || !container) {
+    return
+  }
+
+  const width = Math.max(container.clientWidth, 320)
+  const height = Math.max(container.clientHeight, 240)
+
+  state.camera.aspect = width / height
+  state.camera.updateProjectionMatrix()
+  state.renderer.setSize(width, height)
 }
 
-// ===== REFS =====
-const canvasContainer = ref<HTMLDivElement>()
-const minimapCanvas = ref<HTMLCanvasElement>()
+function updatePointCloud(positions: number[], colors: number[]) {
+  const state = sceneState.value
+  if (!state) {
+    return
+  }
 
-// États
-const isXRSupported = ref(false)
-const isScanning = ref(false)
-const scanPoints = ref<ScanPoint[]>([])
-const userPosition = ref({ x: 0, y: 1.6, z: 0 }) // Position debout
-const xrMessage = ref('')
-const fps = ref(0)
-const isSidebarOpen = ref(true)
-const roomBounds = ref<RoomBounds>({ min: new THREE.Vector3(), max: new THREE.Vector3() })
+  state.pointGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  state.pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+  state.pointGeometry.computeBoundingSphere()
+  pointCount.value = positions.length / 3
+}
 
-// Three.js objets
-let scene: THREE.Scene
-let camera: THREE.PerspectiveCamera
-let renderer: THREE.WebGLRenderer
-let animationId: number
-let minimapCtx: CanvasRenderingContext2D | null = null
+function sampleRoomToPointCloud() {
+  const video = videoRef.value
+  const scanCanvas = scannerCanvasRef.value
+  if (!video || !scanCanvas || video.videoWidth === 0 || video.videoHeight === 0) {
+    return
+  }
 
-// Scanning
-let pointsMesh: THREE.Points | null = null
-let scanInterval: number | null = null
-let lastScanTime = 0
+  const sampleWidth = 160
+  const sampleHeight = 120
+  scanCanvas.width = sampleWidth
+  scanCanvas.height = sampleHeight
 
-let lastFrameTime = Date.now()
-let frameCount = 0
+  const ctx = scanCanvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) {
+    return
+  }
 
-// ===== INITIALIZATION =====
-onMounted(async () => {
-  // Vérifier support WebXR
-  if ('xr' in navigator) {
-    try {
-      const supported = await (navigator as any).xr?.isSessionSupported('immersive-ar')
-      isXRSupported.value = supported || false
-      xrMessage.value = supported ? '✅ WebXR (AR) disponible' : '⚠️ WebXR non disponible sur ce navigateur'
-    } catch {
-      isXRSupported.value = false
-      xrMessage.value = '❌ Erreur WebXR'
+  ctx.drawImage(video, 0, 0, sampleWidth, sampleHeight)
+  const imageData = ctx.getImageData(0, 0, sampleWidth, sampleHeight)
+  const data = imageData.data
+
+  const positions: number[] = []
+  const colors: number[] = []
+
+  const step = 3
+  frameCount.value += 1
+  const frameWave = Math.sin(frameCount.value * 0.09) * 0.18
+
+  for (let y = 0; y < sampleHeight; y += step) {
+    for (let x = 0; x < sampleWidth; x += step) {
+      const i = (y * sampleWidth + x) * 4
+      const r = data[i]
+      const g = data[i + 1]
+      const b = data[i + 2]
+      const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+      const nextX = Math.min(x + 1, sampleWidth - 1)
+      const nextY = Math.min(y + 1, sampleHeight - 1)
+      const iX = (y * sampleWidth + nextX) * 4
+      const iY = (nextY * sampleWidth + x) * 4
+      const lumX = 0.2126 * data[iX] + 0.7152 * data[iX + 1] + 0.0722 * data[iX + 2]
+      const lumY = 0.2126 * data[iY] + 0.7152 * data[iY + 1] + 0.0722 * data[iY + 2]
+      const contrast = Math.min(Math.abs(lumX - luminance) + Math.abs(lumY - luminance), 255)
+
+      const xNorm = x / sampleWidth - 0.5
+      const yNorm = 0.5 - y / sampleHeight
+
+      const estimatedDepth = (255 - luminance) / 255
+      const contrastBoost = contrast / 255
+      const z = estimatedDepth * 3.4 + contrastBoost * 1.2 + frameWave
+
+      positions.push(xNorm * 6.4, yNorm * 3.6, z)
+
+      const colorDepth = 1 - estimatedDepth
+      colors.push(colorDepth, 0.35 + contrastBoost * 0.45, estimatedDepth)
     }
   }
 
-  if (!canvasContainer.value) return
+  updatePointCloud(positions, colors)
+  statusMessage.value = `Scanning in progress (${pointCount.value} xyz points)`
+}
 
-  // Setup Three.js
-  setupThreeJS()
-
-  // Setup minimap
-  if (minimapCanvas.value) {
-    minimapCtx = minimapCanvas.value.getContext('2d')
+function scanLoop() {
+  if (!scanning.value) {
+    return
   }
 
-  // Lancer animation
-  animate()
-
-  // Redimensionnement
-  window.addEventListener('resize', onWindowResize)
-})
-
-onUnmounted(() => {
-  cancelAnimationFrame(animationId)
-  if (scanInterval) clearInterval(scanInterval)
-  window.removeEventListener('resize', onWindowResize)
-})
-
-// ===== THREE.JS SETUP =====
-function setupThreeJS() {
-  if (!canvasContainer.value) return
-
-  const width = canvasContainer.value.clientWidth
-  const height = canvasContainer.value.clientHeight
-
-  // Scene
-  scene = new THREE.Scene()
-  scene.background = new THREE.Color(0x1a1a2e)
-
-  // Camera
-  camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000)
-  camera.position.set(0, 1.6, 5)
-  camera.lookAt(0, 1, 0)
-
-  // Renderer
-  renderer = new THREE.WebGLRenderer({ antialias: true })
-  renderer.setSize(width, height)
-  renderer.shadowMap.enabled = true
-  canvasContainer.value.appendChild(renderer.domElement)
-
-  // Lighting
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
-  scene.add(ambientLight)
-
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
-  directionalLight.position.set(5, 5, 5)
-  scene.add(directionalLight)
-
-  // Sol avec grille
-  const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222)
-  scene.add(gridHelper)
-
-  // Marker position utilisateur
-  const userMarker = new THREE.Mesh(
-    new THREE.SphereGeometry(0.1, 16, 16),
-    new THREE.MeshBasicMaterial({ color: 0xff0000 })
-  )
-  userMarker.position.set(userPosition.value.x, userPosition.value.y, userPosition.value.z)
-  scene.add(userMarker)
-
-  // Points cloud setup
-  setupPointsCloud()
+  sampleRoomToPointCloud()
+  scannerRafId = requestAnimationFrame(scanLoop)
 }
 
-// ===== POINTS CLOUD =====
-function setupPointsCloud() {
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3))
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3))
+async function openCamera() {
+  if (cameraActive.value) {
+    return
+  }
 
-  const material = new THREE.PointsMaterial({
-    size: 0.05,
-    sizeAttenuation: true,
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.8
-  })
+  try {
+    statusMessage.value = 'Requesting camera access...'
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    })
 
-  pointsMesh = new THREE.Points(geometry, material)
-  scene.add(pointsMesh)
+    const video = videoRef.value
+    if (!video) {
+      throw new Error('Video element is unavailable')
+    }
+
+    video.srcObject = mediaStream
+    await video.play()
+    cameraActive.value = true
+    statusMessage.value = 'Camera is ready'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown camera error'
+    statusMessage.value = `Camera error: ${message}`
+    cameraActive.value = false
+  }
 }
 
-// ===== SCANNING FUNCTIONS =====
+function stopCamera() {
+  if (scannerRafId) {
+    cancelAnimationFrame(scannerRafId)
+    scannerRafId = 0
+  }
+  scanning.value = false
+
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((track) => track.stop())
+    mediaStream = null
+  }
+
+  const video = videoRef.value
+  if (video) {
+    video.pause()
+    video.srcObject = null
+  }
+
+  cameraActive.value = false
+  statusMessage.value = 'Camera is off'
+}
+
 function startScan() {
-  if (isScanning.value) return
+  if (!cameraActive.value || scanning.value) {
+    return
+  }
 
-  isScanning.value = true
-  xrMessage.value = '🔄 Scanning en cours...'
-
-  scanInterval = window.setInterval(() => {
-    addScanPoints()
-    updatePointsVisualization()
-    updateRoomBounds()
-  }, 100)
+  scanning.value = true
+  statusMessage.value = 'Preparing room scan...'
+  scanLoop()
 }
 
 function stopScan() {
-  isScanning.value = false
-  if (scanInterval) {
-    clearInterval(scanInterval)
-    scanInterval = null
+  scanning.value = false
+  if (scannerRafId) {
+    cancelAnimationFrame(scannerRafId)
+    scannerRafId = 0
   }
-  xrMessage.value = `✅ Scan terminé - ${scanPoints.value.length} points`
+  statusMessage.value = 'Scan paused'
 }
 
-function addScanPoints() {
-  const now = Date.now()
-  if (now - lastScanTime < 50) return // Limite la fréquence
-
-  lastScanTime = now
-
-  // Générer des points autour de la position utilisateur
-  const numPoints = 3
-  for (let i = 0; i < numPoints; i++) {
-    // Distance et angle aléatoires
-    const distance = 0.5 + Math.random() * 3
-    const angle = Math.random() * Math.PI * 2
-    const height = Math.random() * 2.5
-
-    const point: ScanPoint = {
-      position: new THREE.Vector3(
-        userPosition.value.x + Math.cos(angle) * distance,
-        height,
-        userPosition.value.z + Math.sin(angle) * distance
-      ),
-      color: new THREE.Color().setHSL(Math.random(), 0.7, 0.6),
-      timestamp: now
-    }
-
-    scanPoints.value.push(point)
-  }
+function resetCloud() {
+  updatePointCloud([], [])
+  frameCount.value = 0
+  statusMessage.value = cameraActive.value ? 'Point cloud reset' : 'Camera is off'
 }
 
-function updatePointsVisualization() {
-  if (!pointsMesh) return
+onMounted(async () => {
+  await nextTick()
+  createThreeScene()
+  updateSize()
+  window.addEventListener('resize', updateSize)
+})
 
-  const positions = new Float32Array(scanPoints.value.length * 3)
-  const colors = new Float32Array(scanPoints.value.length * 3)
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateSize)
+  stopCamera()
 
-  scanPoints.value.forEach((point, i) => {
-    positions[i * 3] = point.position.x
-    positions[i * 3 + 1] = point.position.y
-    positions[i * 3 + 2] = point.position.z
-
-    colors[i * 3] = point.color.r
-    colors[i * 3 + 1] = point.color.g
-    colors[i * 3 + 2] = point.color.b
-  })
-
-  pointsMesh.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  pointsMesh.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  pointsMesh.geometry.attributes.position.needsUpdate = true
-  pointsMesh.geometry.attributes.color.needsUpdate = true
-}
-
-function updateRoomBounds() {
-  if (scanPoints.value.length === 0) return
-
-  const min = new THREE.Vector3(Infinity, Infinity, Infinity)
-  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity)
-
-  scanPoints.value.forEach(point => {
-    min.min(point.position)
-    max.max(point.position)
-  })
-
-  roomBounds.value = { min, max }
-}
-
-function clearScan() {
-  scanPoints.value = []
-  updatePointsVisualization()
-  roomBounds.value = { min: new THREE.Vector3(), max: new THREE.Vector3() }
-  xrMessage.value = '🗑️ Scan effacé'
-}
-
-// ===== MOVEMENT SIMULATION =====
-function moveForward() {
-  userPosition.value.z -= 0.5
-  updateUserMarker()
-}
-
-function moveBackward() {
-  userPosition.value.z += 0.5
-  updateUserMarker()
-}
-
-function moveLeft() {
-  userPosition.value.x -= 0.5
-  updateUserMarker()
-}
-
-function moveRight() {
-  userPosition.value.x += 0.5
-  updateUserMarker()
-}
-
-function updateUserMarker() {
-  const userMarker = scene.children.find(child => child.type === 'Mesh' && (child as THREE.Mesh).geometry.type === 'SphereGeometry')
-  if (userMarker) {
-    userMarker.position.set(userPosition.value.x, userPosition.value.y, userPosition.value.z)
-  }
-}
-
-// ===== ANIMATION =====
-function animate() {
-  animationId = requestAnimationFrame(animate)
-
-  // FPS counter
-  frameCount++
-  const now = Date.now()
-  if (now - lastFrameTime > 1000) {
-    fps.value = frameCount
-    frameCount = 0
-    lastFrameTime = now
+  if (renderRafId) {
+    cancelAnimationFrame(renderRafId)
+    renderRafId = 0
   }
 
-  updateMinimap()
-  renderer.render(scene, camera)
-}
-
-function onWindowResize() {
-  if (!canvasContainer.value) return
-  const width = canvasContainer.value.clientWidth
-  const height = canvasContainer.value.clientHeight
-  camera.aspect = width / height
-  camera.updateProjectionMatrix()
-  renderer.setSize(width, height)
-}
-
-// ===== MINIMAP =====
-function updateMinimap() {
-  if (!minimapCtx || !minimapCanvas.value) return
-
-  const canvas = minimapCanvas.value
-  const ctx = minimapCtx
-  const w = canvas.width
-  const h = canvas.height
-  const scale = 10 // pixels per meter
-
-  // Clear
-  ctx.fillStyle = '#1a1a2e'
-  ctx.fillRect(0, 0, w, h)
-
-  // Grid
-  ctx.strokeStyle = '#333'
-  ctx.lineWidth = 1
-  for (let i = 0; i <= 20; i++) {
-    ctx.beginPath()
-    ctx.moveTo(i * (w / 20), 0)
-    ctx.lineTo(i * (w / 20), h)
-    ctx.stroke()
-
-    ctx.beginPath()
-    ctx.moveTo(0, i * (h / 20))
-    ctx.lineTo(w, i * (h / 20))
-    ctx.stroke()
+  const state = sceneState.value
+  if (state) {
+    state.controls.dispose()
+    state.pointGeometry.dispose()
+    state.pointMaterial.dispose()
+    state.renderer.dispose()
+    sceneState.value = null
   }
-
-  const centerX = w / 2
-  const centerY = h / 2
-
-  // Room bounds
-  if (scanPoints.value.length > 0) {
-    const bounds = roomBounds.value
-    const width = (bounds.max.x - bounds.min.x) * scale
-    const height = (bounds.max.z - bounds.min.z) * scale
-    const x = centerX + bounds.min.x * scale
-    const y = centerY + bounds.min.z * scale
-
-    ctx.strokeStyle = '#00ff88'
-    ctx.lineWidth = 2
-    ctx.strokeRect(x, y, width, height)
-  }
-
-  // Scan points
-  ctx.fillStyle = 'rgba(0, 255, 136, 0.6)'
-  scanPoints.value.forEach(point => {
-    const px = centerX + point.position.x * scale
-    const pz = centerY + point.position.z * scale
-    if (px > 0 && px < w && pz > 0 && pz < h) {
-      ctx.fillRect(px - 1, pz - 1, 2, 2)
-    }
-  })
-
-  // User position
-  ctx.fillStyle = '#ff4444'
-  ctx.beginPath()
-  ctx.arc(centerX, centerY, 6, 0, Math.PI * 2)
-  ctx.fill()
-
-  // Info text
-  ctx.fillStyle = '#0f0'
-  ctx.font = '12px monospace'
-  ctx.fillText(`Points: ${scanPoints.value.length}`, 5, 15)
-  ctx.fillText(`Pos: (${userPosition.value.x.toFixed(1)}, ${userPosition.value.z.toFixed(1)})`, 5, 30)
-}
+})
 </script>
 
 <template>
-  <div class="room-scanner-container">
-    <!-- Header -->
-    <div class="header">
-      <h1>🏠 Room Scanner 3D</h1>
-      <div class="info-bar">
-        <span :class="['status', { scanning: isScanning }]">{{ xrMessage }}</span>
-        <span class="fps-counter">FPS: {{ fps }}</span>
+  <main class="scanner-page">
+    <section class="panel controls">
+      <h1>RoomScanner</h1>
+      <p>
+        Open camera, scan your room, and generate an estimated 3D xyz point cloud.
+      </p>
+
+      <div class="actions">
+        <button class="btn primary" type="button" @click="openCamera" :disabled="cameraActive">
+          Open Camera
+        </button>
+        <button class="btn" type="button" @click="stopCamera" :disabled="!cameraActive">
+          Close Camera
+        </button>
+        <button class="btn success" type="button" @click="startScan" :disabled="!canScan || scanning">
+          Start Scan
+        </button>
+        <button class="btn" type="button" @click="stopScan" :disabled="!scanning">
+          Stop Scan
+        </button>
+        <button class="btn" type="button" @click="resetCloud">
+          Reset Cloud
+        </button>
       </div>
-    </div>
 
-    <!-- Main Content -->
-    <div class="main-content">
-      <!-- 3D Viewer -->
-      <div class="viewer-section">
-        <div ref="canvasContainer" class="canvas-container"></div>
+      <div class="status-grid">
+        <span>Status</span>
+        <strong>{{ statusMessage }}</strong>
+        <span>Points</span>
+        <strong>{{ pointCount }}</strong>
+        <span>Axes</span>
+        <strong>X (red), Y (green), Z (blue)</strong>
       </div>
 
-      <!-- Sidebar -->
-      <aside class="sidebar" :class="{ open: isSidebarOpen }">
-        <div class="sidebar-header">
-          <h3>📊 Contrôles</h3>
-          <button @click="isSidebarOpen = !isSidebarOpen" class="btn btn-icon">×</button>
-        </div>
+      <video ref="videoRef" autoplay muted playsinline></video>
+      <canvas ref="scannerCanvasRef" class="hidden-canvas"></canvas>
+    </section>
 
-        <div class="sidebar-body">
-          <!-- Minimap -->
-          <div class="minimap-section">
-            <h3>🗺️ Minimap</h3>
-            <canvas ref="minimapCanvas" width="300" height="300" class="minimap"></canvas>
-            <div class="position-info">
-              <p><strong>Position:</strong></p>
-              <p>X: {{ userPosition.x.toFixed(2) }} m</p>
-              <p>Y: {{ userPosition.y.toFixed(2) }} m</p>
-              <p>Z: {{ userPosition.z.toFixed(2) }} m</p>
-            </div>
-          </div>
-
-          <!-- Movement Controls -->
-          <div class="control-group">
-            <h3>🚶 Mouvement</h3>
-            <div class="movement-controls">
-              <button @click="moveForward" class="btn btn-secondary">↑ Avant</button>
-              <div class="movement-row">
-                <button @click="moveLeft" class="btn btn-secondary">← Gauche</button>
-                <button @click="moveRight" class="btn btn-secondary">→ Droite</button>
-              </div>
-              <button @click="moveBackward" class="btn btn-secondary">↓ Arrière</button>
-            </div>
-          </div>
-
-          <!-- Scan Controls -->
-          <div class="control-group">
-            <h3>🔍 Scanning</h3>
-            <button @click="startScan" :disabled="isScanning" class="btn btn-primary">
-              ▶️ Démarrer Scan
-            </button>
-            <button @click="stopScan" :disabled="!isScanning" class="btn btn-secondary">
-              ⏹️ Arrêter Scan
-            </button>
-            <button @click="clearScan" class="btn btn-warning">
-              🗑️ Effacer ({{ scanPoints.length }} points)
-            </button>
-          </div>
-
-          <!-- Room Info -->
-          <div class="control-group">
-            <h3>🏠 Informations Pièce</h3>
-            <div class="room-info">
-              <p><strong>Points scannés:</strong> {{ scanPoints.length }}</p>
-              <p v-if="scanPoints.length > 0">
-                <strong>Dimensions:</strong><br>
-                L: {{ (roomBounds.max.x - roomBounds.min.x).toFixed(1) }}m<br>
-                P: {{ (roomBounds.max.z - roomBounds.min.z).toFixed(1) }}m<br>
-                H: {{ (roomBounds.max.y - roomBounds.min.y).toFixed(1) }}m
-              </p>
-            </div>
-          </div>
-        </div>
-      </aside>
-    </div>
-
-    <!-- Toggle Sidebar Button -->
-    <button @click="isSidebarOpen = !isSidebarOpen" class="sidebar-toggle">
-      {{ isSidebarOpen ? '◁' : '▷' }}
-    </button>
-  </div>
+    <section class="panel viewer">
+      <div ref="sceneContainerRef" class="scene-host"></div>
+      <small>
+        XYZ output is an estimated monocular depth map, useful as a lightweight room reconstruction preview.
+      </small>
+    </section>
+  </main>
 </template>
 
 <style scoped>
-.room-scanner-container {
-  width: 100vw;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  background: #0a0a0a;
-  color: #fff;
+.scanner-page {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(380px, 1fr);
+  gap: 1rem;
+  padding: 1rem;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at 15% 20%, #173457 0%, transparent 45%),
+    radial-gradient(circle at 80% 85%, #194f4f 0%, transparent 42%),
+    #04080f;
+  color: #eef4f9;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  overflow: hidden;
 }
 
-/* ===== HEADER ===== */
-.header {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-  padding: 12px 16px;
-  border-bottom: 2px solid #00ff88;
-  flex-shrink: 0;
+.panel {
+  background: rgba(7, 16, 29, 0.82);
+  border: 1px solid rgba(132, 186, 216, 0.3);
+  border-radius: 14px;
+  padding: 1rem;
+  backdrop-filter: blur(6px);
 }
 
-.header h1 {
+h1 {
   margin: 0;
-  font-size: 20px;
-  background: linear-gradient(90deg, #00ff88, #00ccff);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  font-size: 1.7rem;
 }
 
-.info-bar {
-  display: flex;
-  gap: 16px;
-  margin-top: 8px;
-  font-size: 12px;
+p {
+  margin-top: 0.55rem;
+  color: #b9cbda;
+  line-height: 1.35;
 }
 
-.status {
-  padding: 4px 8px;
-  border-radius: 4px;
-  background: #333;
+.actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 0.6rem;
+  margin: 0.75rem 0;
 }
 
-.status.scanning {
-  background: #1a4a1a;
-  color: #00ff88;
-}
-
-.fps-counter {
-  color: #00ccff;
-}
-
-/* ===== MAIN CONTENT ===== */
-.main-content {
-  flex: 1;
-  display: flex;
-  position: relative;
-}
-
-.viewer-section {
-  flex: 1;
-  position: relative;
-}
-
-.canvas-container {
-  width: 100%;
-  height: 100%;
-}
-
-/* ===== SIDEBAR ===== */
-.sidebar {
-  width: 320px;
-  background: #1a1a2e;
-  border-left: 2px solid #333;
-  display: flex;
-  flex-direction: column;
-  transform: translateX(100%);
-  transition: transform 0.3s ease;
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  z-index: 10;
-}
-
-.sidebar.open {
-  transform: translateX(0);
-}
-
-.sidebar-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px;
-  border-bottom: 1px solid #333;
-  background: #0a0a0a;
-}
-
-.sidebar-header h3 {
-  margin: 0;
-  color: #00ff88;
-}
-
-.sidebar-body {
-  flex: 1;
-  padding: 16px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-/* ===== MINIMAP ===== */
-.minimap-section h3 {
-  margin: 0 0 8px 0;
-  font-size: 14px;
-  color: #00ff88;
-}
-
-.minimap {
-  border: 1px solid #555;
-  border-radius: 4px;
-  background: #0a0a0a;
-  width: 100%;
-  aspect-ratio: 1;
-}
-
-.position-info {
-  margin-top: 8px;
-  font-size: 11px;
-  background: #0a0a0a;
-  padding: 8px;
-  border-radius: 4px;
-  border: 1px solid #333;
-}
-
-.position-info p {
-  margin: 2px 0;
-  font-family: monospace;
-  color: #00ccff;
-}
-
-/* ===== CONTROLS ===== */
-.control-group {
-  background: #0a0a0a;
-  padding: 12px;
-  border-radius: 4px;
-  border: 1px solid #333;
-}
-
-.control-group h3 {
-  margin: 0 0 8px 0;
-  font-size: 14px;
-  color: #00ff88;
-}
-
-.movement-controls {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.movement-row {
-  display: flex;
-  gap: 8px;
-}
-
-.room-info {
-  font-size: 12px;
-  color: #ccc;
-}
-
-.room-info p {
-  margin: 4px 0;
-}
-
-/* ===== BUTTONS ===== */
 .btn {
-  padding: 8px 12px;
-  border: 1px solid #555;
-  border-radius: 4px;
-  background: #2a2a3e;
-  color: #fff;
+  border: 1px solid rgba(147, 188, 209, 0.45);
+  background: rgba(35, 66, 90, 0.7);
+  color: #eef4f9;
+  padding: 0.58rem 0.68rem;
+  border-radius: 10px;
   cursor: pointer;
-  font-size: 12px;
-  transition: all 0.2s;
-  text-transform: uppercase;
-  font-weight: bold;
+  transition: transform 0.16s ease, background-color 0.16s ease;
 }
 
 .btn:hover:not(:disabled) {
-  background: #3a3a4e;
-  border-color: #00ff88;
-}
-
-.btn-primary:not(:disabled) {
-  background: #1a3a1a;
-  border-color: #00ff88;
-  color: #00ff88;
-}
-
-.btn-primary:not(:disabled):hover {
-  background: #1a4a1a;
-  box-shadow: 0 0 8px rgba(0, 255, 136, 0.2);
-}
-
-.btn-secondary:not(:disabled) {
-  background: #3a1a1a;
-  border-color: #ff4444;
-  color: #ff8888;
-}
-
-.btn-secondary:not(:disabled):hover {
-  background: #4a1a1a;
-}
-
-.btn-warning:not(:disabled) {
-  background: #4a4a1a;
-  border-color: #ffcc00;
-  color: #ffdd44;
+  transform: translateY(-1px);
+  background: rgba(49, 92, 121, 0.88);
 }
 
 .btn:disabled {
-  opacity: 0.4;
+  opacity: 0.44;
   cursor: not-allowed;
-  background: #1a1a1a;
 }
 
-.btn-icon {
-  background: transparent;
-  border: none;
-  color: #ff4444;
-  font-size: 16px;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
+.btn.primary {
+  background: rgba(35, 94, 125, 0.85);
 }
 
-.btn-icon:hover {
-  background: #4a1a1a;
+.btn.success {
+  background: rgba(24, 113, 92, 0.85);
 }
 
-/* ===== SIDEBAR TOGGLE ===== */
-.sidebar-toggle {
-  position: absolute;
-  top: 50%;
-  right: 8px;
-  transform: translateY(-50%);
-  background: #1a1a2e;
-  border: 2px solid #00ff88;
-  color: #00ff88;
-  font-size: 18px;
-  padding: 8px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-  z-index: 5;
-  transition: all 0.3s;
+.status-grid {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 0.22rem 0.65rem;
+  margin-bottom: 0.85rem;
+  font-size: 0.94rem;
 }
 
-.sidebar-toggle:hover {
-  background: #00ff88;
-  color: #1a1a2e;
+video {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(152, 196, 221, 0.42);
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #000;
 }
 
-/* ===== RESPONSIVE ===== */
-@media (max-width: 768px) {
-  .sidebar {
-    width: 280px;
+.hidden-canvas {
+  display: none;
+}
+
+.viewer {
+  display: flex;
+  flex-direction: column;
+}
+
+.scene-host {
+  flex: 1;
+  min-height: 500px;
+  border-radius: 12px;
+  border: 1px solid rgba(152, 196, 221, 0.32);
+  overflow: hidden;
+}
+
+small {
+  margin-top: 0.6rem;
+  color: #9bb4c9;
+  line-height: 1.45;
+}
+
+@media (max-width: 980px) {
+  .scanner-page {
+    grid-template-columns: 1fr;
   }
 
-  .header h1 {
-    font-size: 16px;
-  }
-
-  .minimap {
-    width: 100%;
-    height: 200px;
+  .scene-host {
+    min-height: 380px;
   }
 }
 </style>
-  width: 100%;
-  height: 100%;
-}
-
-/* ===== MINIMAP (Compact & Responsive) ===== */
-.minimap-section {
-  background: #1a1a2e;
-  border: 2px solid #333;
-  border-radius: 6px;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 180px;
-  width: 200px;
-  flex-shrink: 0;
-}
-
-.minimap-section h3 {
-  margin: 0;
-  font-size: 11px;
-  color: #00ff88;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.minimap {
-  border: 1px solid #555;
-  border-radius: 3px;
-  background: #0a0a0a;
-  width: 100%;
-  aspect-ratio: 1;
-  min-height: 120px;
-}
-
-.position-info {
-  font-size: 9px;
-  background: #0a0a0a;
-  padding: 6px;
-  border-radius: 3px;
-  border: 1px solid #333;
-}
-
-.position-info p {
-  margin: 1px 0;
-  font-family: monospace;
-  color: #00ccff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* ===== CONTROLS PANEL (Horizontal + Compact) ===== */
-.controls-panel {
-  display: flex;
-  gap: 8px;
-  padding: 8px;
-  background: #1a1a2e;
-  border-top: 1px solid #333;
-  flex-wrap: wrap;
-  align-items: center;
-  flex-shrink: 0;
-  overflow-y: auto;
-  max-height: 100px;
-}
-
-.control-group {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.control-group h3 {
-  margin: 0;
-  font-size: 9px;
-  color: #00ff88;
-  text-transform: uppercase;
-  white-space: nowrap;
-  flex-basis: 100%;
-}
-
-.btn {
-  padding: 5px 10px;
-  border: 1px solid #555;
-  border-radius: 3px;
-  background: #2a2a3e;
-  color: #fff;
-  cursor: pointer;
-  font-size: 10px;
-  transition: all 0.2s;
-  text-transform: uppercase;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.btn:hover:not(:disabled) {
-  background: #3a3a4e;
-  border-color: #00ff88;
-}
-
-.btn-primary:not(:disabled) {
-  background: #1a3a1a;
-  border-color: #00ff88;
-  color: #00ff88;
-}
-
-.btn-primary:not(:disabled):hover {
-  background: #1a4a1a;
-  box-shadow: 0 0 8px rgba(0, 255, 136, 0.2);
-}
-
-.btn-secondary:not(:disabled) {
-  background: #3a1a1a;
-  border-color: #ff4444;
-  color: #ff8888;
-}
-
-.btn-secondary:not(:disabled):hover {
-  background: #4a1a1a;
-}
-
-.btn-success:not(:disabled) {
-  background: #1a3a3a;
-  border-color: #00ccff;
-  color: #00ccff;
-}
-
-.btn-danger:not(:disabled) {
-  background: #4a1a1a;
-  border-color: #ff4444;
-  color: #ff6666;
-}
-
-.btn-warning:not(:disabled) {
-  background: #4a4a1a;
-  border-color: #ffcc00;
-  color: #ffdd44;
-}
-
-.btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-  background: #1a1a1a;
-}
-
-.video-preview {
-  height: 60px;
-  width: 80px;
-  border: 1px solid #555;
-  border-radius: 3px;
-  background: #000;
-  object-fit: cover;
-  flex-shrink: 0;
-}
-
-/* ===== DEBUG INFO (Very Compact) ===== */
-.debug-info {
-  background: #0a0a0a;
-  padding: 4px 8px;
-  border-top: 1px solid #333;
-  font-size: 9px;
-  font-family: monospace;
-  color: #00ccff;
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  align-items: center;
-  flex-shrink: 0;
-  overflow: hidden;
-}
-
-.debug-info p {
-  margin: 0;
-  white-space: nowrap;
-}
-
-/* ===== RESPONSIVE: Mobile ===== */
-@media (max-width: 768px) {
-  .header {
-    min-height: 45px;
-    padding: 6px 8px;
-  }
-
-  .header h1 {
-    font-size: 14px;
-  }
-
-  .main-content {
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .minimap-section {
-    width: 100%;
-    min-width: auto;
