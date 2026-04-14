@@ -14,9 +14,23 @@ const statusMessage = ref('Camera is off')
 const pointCount = ref(0)
 const frameCount = ref(0)
 
+interface Marker {
+  id: number
+  sx: number  // sample-space x (0..160)
+  sy: number  // sample-space y (0..120)
+  x3d: number
+  y3d: number
+  z3d: number
+  label: string
+}
+
+const markers = ref<Marker[]>([])
+let nextMarkerId = 1
+
 let mediaStream: MediaStream | null = null
 let scannerRafId = 0
 let renderRafId = 0
+let markerMeshes: THREE.Mesh[] = []
 
 let lastOverlayPoints: { x: number; y: number; r: number; g: number; b: number; depth: number }[] = []
 
@@ -229,6 +243,54 @@ function drawOverlay() {
     ctx.arc(px, py, dotSize, 0, Math.PI * 2)
     ctx.fill()
   }
+
+  // Draw markers on overlay
+  for (const mk of markers.value) {
+    const mx = mk.sx * scaleX
+    const my = mk.sy * scaleY
+    const radius = Math.max(8, dotSize * 4)
+
+    // Outer ring
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 2.5
+    ctx.beginPath()
+    ctx.arc(mx, my, radius, 0, Math.PI * 2)
+    ctx.stroke()
+
+    // Inner filled dot
+    ctx.fillStyle = '#ff3055'
+    ctx.beginPath()
+    ctx.arc(mx, my, radius * 0.45, 0, Math.PI * 2)
+    ctx.fill()
+
+    // Crosshair lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(mx - radius * 1.5, my)
+    ctx.lineTo(mx - radius * 0.7, my)
+    ctx.moveTo(mx + radius * 0.7, my)
+    ctx.lineTo(mx + radius * 1.5, my)
+    ctx.moveTo(mx, my - radius * 1.5)
+    ctx.lineTo(mx, my - radius * 0.7)
+    ctx.moveTo(mx, my + radius * 0.7)
+    ctx.lineTo(mx, my + radius * 1.5)
+    ctx.stroke()
+
+    // Label
+    ctx.font = `bold ${Math.max(12, radius * 0.9)}px sans-serif`
+    ctx.fillStyle = '#ffffff'
+    ctx.fillText(mk.label, mx + radius + 4, my - radius * 0.3)
+
+    // Coordinates
+    ctx.font = `${Math.max(10, radius * 0.7)}px monospace`
+    ctx.fillStyle = '#b0d0e8'
+    ctx.fillText(
+      `(${mk.x3d.toFixed(2)}, ${mk.y3d.toFixed(2)}, ${mk.z3d.toFixed(2)})`,
+      mx + radius + 4,
+      my + radius * 0.6
+    )
+  }
 }
 
 function scanLoop() {
@@ -314,9 +376,112 @@ function stopScan() {
   statusMessage.value = 'Scan paused'
 }
 
+function onOverlayClick(event: MouseEvent) {
+  const canvas = overlayCanvasRef.value
+  if (!canvas || lastOverlayPoints.length === 0) {
+    return
+  }
+
+  const rect = canvas.getBoundingClientRect()
+  const clickX = event.clientX - rect.left
+  const clickY = event.clientY - rect.top
+
+  const sampleWidth = 160
+  const sampleHeight = 120
+  const scaleX = canvas.clientWidth / sampleWidth
+  const scaleY = canvas.clientHeight / sampleHeight
+
+  // Find nearest scanned point to click position
+  let bestDist = Infinity
+  let bestPt = lastOverlayPoints[0]
+  for (const pt of lastOverlayPoints) {
+    const dx = pt.x * scaleX - clickX
+    const dy = pt.y * scaleY - clickY
+    const d = dx * dx + dy * dy
+    if (d < bestDist) {
+      bestDist = d
+      bestPt = pt
+    }
+  }
+
+  // Compute 3D coordinates using the same logic as sampleRoomToPointCloud
+  const xNorm = bestPt.x / sampleWidth - 0.5
+  const yNorm = 0.5 - bestPt.y / sampleHeight
+  const estimatedDepth = bestPt.depth
+  const contrastBoost = (bestPt.g - 0.35) / 0.45  // reverse from color encoding
+  const frameWave = Math.sin(frameCount.value * 0.09) * 0.18
+  const z3d = estimatedDepth * 3.4 + Math.max(0, contrastBoost) * 1.2 + frameWave
+  const x3d = xNorm * 6.4
+  const y3d = yNorm * 3.6
+
+  const id = nextMarkerId++
+  const marker: Marker = {
+    id,
+    sx: bestPt.x,
+    sy: bestPt.y,
+    x3d,
+    y3d,
+    z3d,
+    label: `M${id}`
+  }
+  markers.value.push(marker)
+
+  // Add 3D sphere in scene
+  addMarker3D(marker)
+  statusMessage.value = `Marker ${marker.label} placed at (${x3d.toFixed(2)}, ${y3d.toFixed(2)}, ${z3d.toFixed(2)})`
+}
+
+function addMarker3D(marker: Marker) {
+  const state = sceneState.value
+  if (!state) {
+    return
+  }
+
+  const geo = new THREE.SphereGeometry(0.09, 16, 16)
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff3055, emissive: 0xff1030, emissiveIntensity: 0.5 })
+  const mesh = new THREE.Mesh(geo, mat)
+  mesh.position.set(marker.x3d, marker.y3d, marker.z3d)
+  mesh.name = `marker-${marker.id}`
+  state.scene.add(mesh)
+  markerMeshes.push(mesh)
+}
+
+function removeMarker(id: number) {
+  markers.value = markers.value.filter(m => m.id !== id)
+
+  const state = sceneState.value
+  if (!state) {
+    return
+  }
+
+  const idx = markerMeshes.findIndex(m => m.name === `marker-${id}`)
+  if (idx !== -1) {
+    const mesh = markerMeshes[idx]
+    state.scene.remove(mesh)
+    mesh.geometry.dispose()
+    ;(mesh.material as THREE.MeshStandardMaterial).dispose()
+    markerMeshes.splice(idx, 1)
+  }
+}
+
+function clearMarkers() {
+  const state = sceneState.value
+  for (const mesh of markerMeshes) {
+    if (state) {
+      state.scene.remove(mesh)
+    }
+    mesh.geometry.dispose()
+    ;(mesh.material as THREE.MeshStandardMaterial).dispose()
+  }
+  markerMeshes = []
+  markers.value = []
+  nextMarkerId = 1
+}
+
 function resetCloud() {
   updatePointCloud([], [])
   frameCount.value = 0
+  clearMarkers()
   statusMessage.value = cameraActive.value ? 'Point cloud reset' : 'Camera is off'
 }
 
@@ -371,6 +536,9 @@ onBeforeUnmount(() => {
         <button class="btn" type="button" @click="resetCloud">
           Reset Cloud
         </button>
+        <button class="btn warn" type="button" @click="clearMarkers" :disabled="markers.length === 0">
+          Clear Markers
+        </button>
       </div>
 
       <div class="status-grid">
@@ -378,8 +546,21 @@ onBeforeUnmount(() => {
         <strong>{{ statusMessage }}</strong>
         <span>Points</span>
         <strong>{{ pointCount }}</strong>
+        <span>Markers</span>
+        <strong>{{ markers.length }}</strong>
         <span>Axes</span>
         <strong>X (red), Y (green), Z (blue)</strong>
+      </div>
+
+      <div v-if="markers.length" class="marker-list">
+        <div v-for="mk in markers" :key="mk.id" class="marker-item">
+          <span class="marker-dot"></span>
+          <span class="marker-label">{{ mk.label }}</span>
+          <span class="marker-coords">
+            ({{ mk.x3d.toFixed(2) }}, {{ mk.y3d.toFixed(2) }}, {{ mk.z3d.toFixed(2) }})
+          </span>
+          <button class="marker-remove" type="button" @click="removeMarker(mk.id)" title="Remove marker">&times;</button>
+        </div>
       </div>
 
       <video ref="videoRef" autoplay muted playsinline></video>
@@ -396,13 +577,13 @@ onBeforeUnmount(() => {
     <section class="panel overlay-panel">
       <h2>AR Overlay</h2>
       <div class="overlay-host">
-        <canvas ref="overlayCanvasRef" class="overlay-canvas"></canvas>
+        <canvas ref="overlayCanvasRef" class="overlay-canvas" @click="onOverlayClick"></canvas>
         <div v-if="!scanning" class="overlay-placeholder">
           Start scanning to see points overlaid on camera
         </div>
       </div>
       <small>
-        Points are drawn on top of the camera feed so you can check alignment with walls &amp; objects.
+        Click on the overlay to place a marker. Points are drawn on top of the camera feed.
       </small>
     </section>
   </main>
@@ -479,6 +660,10 @@ p {
   background: rgba(24, 113, 92, 0.85);
 }
 
+.btn.warn {
+  background: rgba(140, 60, 30, 0.85);
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: 84px 1fr;
@@ -498,6 +683,63 @@ video {
 
 .hidden-canvas {
   display: none;
+}
+
+.marker-list {
+  max-height: 140px;
+  overflow-y: auto;
+  margin-bottom: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.marker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: rgba(255, 48, 85, 0.12);
+  border: 1px solid rgba(255, 48, 85, 0.35);
+  border-radius: 8px;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.88rem;
+}
+
+.marker-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff3055;
+  flex-shrink: 0;
+}
+
+.marker-label {
+  font-weight: 600;
+  color: #ffd4dc;
+}
+
+.marker-coords {
+  font-family: monospace;
+  color: #b0d0e8;
+  flex: 1;
+}
+
+.marker-remove {
+  background: none;
+  border: none;
+  color: #ff6080;
+  font-size: 1.15rem;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  line-height: 1;
+}
+
+.marker-remove:hover {
+  color: #ff3055;
+}
+
+.overlay-canvas {
+  cursor: crosshair;
 }
 
 .viewer {
@@ -537,12 +779,6 @@ small {
   border: 1px solid rgba(152, 196, 221, 0.32);
   overflow: hidden;
   background: #000;
-}
-
-.overlay-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
 }
 
 .overlay-placeholder {
