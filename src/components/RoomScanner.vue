@@ -22,6 +22,9 @@ interface Marker {
   y3d: number
   z3d: number
   label: string
+  patch: Uint8ClampedArray  // grayscale template patch
+  patchSize: number
+  lost: boolean
 }
 
 const markers = ref<Marker[]>([])
@@ -33,6 +36,11 @@ let renderRafId = 0
 let markerMeshes: THREE.Mesh[] = []
 
 let lastOverlayPoints: { x: number; y: number; r: number; g: number; b: number; depth: number }[] = []
+let lastFrameGray: Uint8ClampedArray | null = null
+const PATCH_HALF = 7  // patch is (2*7+1) = 15x15
+const SEARCH_RADIUS = 18
+const SAMPLE_W = 160
+const SAMPLE_H = 120
 
 const sceneState = shallowRef<{
   scene: THREE.Scene
@@ -135,6 +143,102 @@ function updatePointCloud(positions: number[], colors: number[]) {
   pointCount.value = positions.length / 3
 }
 
+function extractGrayscale(data: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
+  const gray = new Uint8ClampedArray(w * h)
+  for (let i = 0; i < w * h; i++) {
+    const off = i * 4
+    gray[i] = Math.round(0.2126 * data[off] + 0.7152 * data[off + 1] + 0.0722 * data[off + 2])
+  }
+  return gray
+}
+
+function extractPatch(gray: Uint8ClampedArray, cx: number, cy: number, half: number, w: number, h: number): Uint8ClampedArray {
+  const size = 2 * half + 1
+  const patch = new Uint8ClampedArray(size * size)
+  for (let dy = -half; dy <= half; dy++) {
+    for (let dx = -half; dx <= half; dx++) {
+      const px = Math.max(0, Math.min(w - 1, cx + dx))
+      const py = Math.max(0, Math.min(h - 1, cy + dy))
+      patch[(dy + half) * size + (dx + half)] = gray[py * w + px]
+    }
+  }
+  return patch
+}
+
+function matchPatch(gray: Uint8ClampedArray, patch: Uint8ClampedArray, patchSize: number, lastX: number, lastY: number, searchRadius: number, w: number, h: number): { bx: number; by: number; score: number } {
+  const half = (patchSize - 1) / 2
+  let bestScore = Infinity
+  let bx = lastX
+  let by = lastY
+
+  const x0 = Math.max(half, lastX - searchRadius)
+  const x1 = Math.min(w - 1 - half, lastX + searchRadius)
+  const y0 = Math.max(half, lastY - searchRadius)
+  const y1 = Math.min(h - 1 - half, lastY + searchRadius)
+
+  for (let cy = y0; cy <= y1; cy += 1) {
+    for (let cx = x0; cx <= x1; cx += 1) {
+      let sad = 0
+      for (let dy = -half; dy <= half; dy++) {
+        const rowOff = (cy + dy) * w
+        const patchRow = (dy + half) * patchSize
+        for (let dx = -half; dx <= half; dx++) {
+          sad += Math.abs(gray[rowOff + cx + dx] - patch[patchRow + (dx + half)])
+        }
+      }
+      if (sad < bestScore) {
+        bestScore = sad
+        bx = cx
+        by = cy
+      }
+    }
+  }
+
+  const numPixels = patchSize * patchSize
+  return { bx, by, score: bestScore / numPixels }
+}
+
+function trackMarkers(gray: Uint8ClampedArray) {
+  const state = sceneState.value
+  for (const mk of markers.value) {
+    if (mk.lost) continue
+
+    const result = matchPatch(gray, mk.patch, mk.patchSize, Math.round(mk.sx), Math.round(mk.sy), SEARCH_RADIUS, SAMPLE_W, SAMPLE_H)
+
+    // If average SAD per pixel is too high, mark as lost
+    if (result.score > 38) {
+      mk.lost = true
+      continue
+    }
+
+    mk.sx = result.bx
+    mk.sy = result.by
+
+    // Recompute 3D from new 2D position
+    const xNorm = mk.sx / SAMPLE_W - 0.5
+    const yNorm = 0.5 - mk.sy / SAMPLE_H
+    const lum = gray[Math.round(mk.sy) * SAMPLE_W + Math.round(mk.sx)]
+    const estimatedDepth = (255 - lum) / 255
+    const frameWave = Math.sin(frameCount.value * 0.09) * 0.18
+    mk.x3d = xNorm * 6.4
+    mk.y3d = yNorm * 3.6
+    mk.z3d = estimatedDepth * 3.4 + frameWave
+
+    // Update 3D mesh
+    if (state) {
+      const mesh = markerMeshes.find(m => m.name === `marker-${mk.id}`)
+      if (mesh) {
+        mesh.position.set(mk.x3d, mk.y3d, mk.z3d)
+      }
+    }
+
+    // Refresh patch template periodically to adapt to lighting changes
+    if (frameCount.value % 15 === 0) {
+      mk.patch = extractPatch(gray, result.bx, result.by, PATCH_HALF, SAMPLE_W, SAMPLE_H)
+    }
+  }
+}
+
 function sampleRoomToPointCloud() {
   const video = videoRef.value
   const scanCanvas = scannerCanvasRef.value
@@ -200,6 +304,10 @@ function sampleRoomToPointCloud() {
   }
 
   lastOverlayPoints = overlayPts
+  lastFrameGray = extractGrayscale(data, sampleWidth, sampleHeight)
+  if (markers.value.length > 0) {
+    trackMarkers(lastFrameGray)
+  }
   updatePointCloud(positions, colors)
   statusMessage.value = `Scanning in progress (${pointCount.value} xyz points)`
 }
@@ -249,6 +357,22 @@ function drawOverlay() {
     const mx = mk.sx * scaleX
     const my = mk.sy * scaleY
     const radius = Math.max(8, dotSize * 4)
+
+    if (mk.lost) {
+      // Draw lost marker with dashed ring
+      ctx.setLineDash([4, 4])
+      ctx.strokeStyle = 'rgba(255,80,80,0.6)'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.arc(mx, my, radius, 0, Math.PI * 2)
+      ctx.stroke()
+      ctx.setLineDash([])
+
+      ctx.font = `bold ${Math.max(11, radius * 0.8)}px sans-serif`
+      ctx.fillStyle = 'rgba(255,120,120,0.8)'
+      ctx.fillText(`${mk.label} (lost)`, mx + radius + 4, my)
+      continue
+    }
 
     // Outer ring
     ctx.strokeStyle = '#ffffff'
@@ -404,6 +528,15 @@ function onOverlayClick(event: MouseEvent) {
     }
   }
 
+  // Capture template patch for tracking
+  if (!lastFrameGray) {
+    return
+  }
+  const patchCx = Math.round(bestPt.x)
+  const patchCy = Math.round(bestPt.y)
+  const patch = extractPatch(lastFrameGray, patchCx, patchCy, PATCH_HALF, SAMPLE_W, SAMPLE_H)
+  const patchSize = 2 * PATCH_HALF + 1
+
   // Compute 3D coordinates using the same logic as sampleRoomToPointCloud
   const xNorm = bestPt.x / sampleWidth - 0.5
   const yNorm = 0.5 - bestPt.y / sampleHeight
@@ -422,7 +555,10 @@ function onOverlayClick(event: MouseEvent) {
     x3d,
     y3d,
     z3d,
-    label: `M${id}`
+    label: `M${id}`,
+    patch,
+    patchSize,
+    lost: false
   }
   markers.value.push(marker)
 
