@@ -57,9 +57,9 @@ let frameViewPts: { px: number; py: number; vx: number; vy: number; vz: number; 
 
 let lastCaptureYaw = -999
 const AUTO_CAPTURE_ANGLE = 8 * Math.PI / 180
-const SAMPLE_W = 160
-const SAMPLE_H = 120
-const MAX_WORLD_POINTS = 250000
+const SAMPLE_W = 80
+const SAMPLE_H = 60
+const MAX_WORLD_POINTS = 80000
 
 // Pinhole camera model
 const HFOV = 55 * Math.PI / 180
@@ -116,7 +116,7 @@ function createThreeScene() {
   scene.add(axes)
 
   const pointGeometry = new THREE.BufferGeometry()
-  const pointMaterial = new THREE.PointsMaterial({ size: 0.04, vertexColors: true })
+  const pointMaterial = new THREE.PointsMaterial({ size: 0.045, vertexColors: true, sizeAttenuation: true })
   const pointMesh = new THREE.Points(pointGeometry, pointMaterial)
   scene.add(pointMesh)
 
@@ -271,20 +271,20 @@ function xrRenderFrame(frame: XRFrame, state: NonNullable<typeof sceneState.valu
     }
 
     // Sparse cloud from hit-test center ray
-    if (results.length > 0 && xrFrameCount % 3 === 0) {
+    if (results.length > 0 && xrFrameCount % 6 === 0) {
       const p = results[0].getPose(localRefSpace)
       if (p) {
         const pos = p.transform.position
         accPositions.push(pos.x, pos.y, pos.z)
         accColors.push(0.3, 0.85, 0.5)
         trimCloud()
-        if (xrFrameCount % 30 === 0) syncCloudToScene()
+        if (xrFrameCount % 60 === 0) syncCloudToScene()
       }
     }
   }
 
   // Depth sensing cloud (when available)
-  if (localRefSpace && xrFrameCount % 5 === 0) {
+  if (localRefSpace && xrFrameCount % 15 === 0) {
     const viewerPose = frame.getViewerPose(localRefSpace)
     if (viewerPose) sampleDepthCloud(frame, viewerPose)
   }
@@ -298,7 +298,7 @@ function sampleDepthCloud(frame: XRFrame, viewerPose: XRViewerPose) {
     const depthInfo = (frame as any).getDepthInformation?.(view)
     if (!depthInfo) continue
     const { width, height } = depthInfo
-    const step = Math.max(4, Math.floor(width / 40))
+    const step = Math.max(8, Math.floor(width / 20))
     const projInv = new THREE.Matrix4().fromArray(view.projectionMatrix).invert()
     const v2w = new THREE.Matrix4().fromArray(view.transform.matrix)
     for (let y = 0; y < height; y += step) {
@@ -451,7 +451,7 @@ function processFrame() {
   const data = ctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H).data
 
   frameViewPts = []
-  const step = 3
+  const step = 4
 
   for (let py = 0; py < SAMPLE_H; py += step) {
     for (let px = 0; px < SAMPLE_W; px += step) {
