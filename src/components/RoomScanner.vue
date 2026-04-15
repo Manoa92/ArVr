@@ -7,6 +7,7 @@ const videoRef = ref<HTMLVideoElement | null>(null)
 const scannerCanvasRef = ref<HTMLCanvasElement | null>(null)
 const overlayCanvasRef = ref<HTMLCanvasElement | null>(null)
 const sceneContainerRef = ref<HTMLDivElement | null>(null)
+const arOverlayRef = ref<HTMLDivElement | null>(null)
 
 const cameraActive = ref(false)
 const scanning = ref(false)
@@ -15,6 +16,8 @@ const pointCount = ref(0)
 const captureCount = ref(0)
 const hasGyro = ref(false)
 const manualYaw = ref(0) // degrees, desktop fallback
+const xrSupported = ref(false)
+const xrActive = ref(false)
 
 interface Marker {
   id: number
@@ -31,6 +34,15 @@ let mediaStream: MediaStream | null = null
 let scannerRafId = 0
 let renderRafId = 0
 let markerMeshes: THREE.Mesh[] = []
+
+// WebXR state
+let xrSession: XRSession | null = null
+let hitTestSource: XRHitTestSource | null = null
+let localRefSpace: XRReferenceSpace | null = null
+let reticleMesh: THREE.Mesh | null = null
+let lastHitPose: XRPose | null = null
+let xrFrameCount = 0
+let xrController: THREE.Group | null = null
 
 // Orientation from device
 let orientAlpha = 0
@@ -62,9 +74,11 @@ const sceneState = shallowRef<{
   pointGeometry: THREE.BufferGeometry
   pointMaterial: THREE.PointsMaterial
   pointMesh: THREE.Points
+  grid: THREE.GridHelper
+  axes: THREE.AxesHelper
 } | null>(null)
 
-const canScan = computed(() => cameraActive.value)
+const canScan = computed(() => cameraActive.value && !xrActive.value)
 
 function createThreeScene() {
   const container = sceneContainerRef.value
@@ -78,7 +92,7 @@ function createThreeScene() {
   const camera = new THREE.PerspectiveCamera(55, container.clientWidth / container.clientHeight, 0.1, 200)
   camera.position.set(0, 1.4, 5)
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true })
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(container.clientWidth, container.clientHeight)
   container.innerHTML = ''
@@ -96,8 +110,10 @@ function createThreeScene() {
   directional.position.set(2, 6, 3)
   scene.add(directional)
 
-  scene.add(new THREE.GridHelper(14, 14, 0x4f7188, 0x1e3546))
-  scene.add(new THREE.AxesHelper(2.2))
+  const grid = new THREE.GridHelper(14, 14, 0x4f7188, 0x1e3546)
+  scene.add(grid)
+  const axes = new THREE.AxesHelper(2.2)
+  scene.add(axes)
 
   const pointGeometry = new THREE.BufferGeometry()
   const pointMaterial = new THREE.PointsMaterial({ size: 0.04, vertexColors: true })
@@ -111,7 +127,9 @@ function createThreeScene() {
     controls,
     pointGeometry,
     pointMaterial,
-    pointMesh
+    pointMesh,
+    grid,
+    axes
   }
 
   const renderLoop = () => {
@@ -129,6 +147,7 @@ function createThreeScene() {
 }
 
 function updateSize() {
+  if (xrActive.value) return
   const state = sceneState.value
   const container = sceneContainerRef.value
   if (!state || !container) {
@@ -153,6 +172,205 @@ function syncCloudToScene() {
   state.pointGeometry.setAttribute('color', new THREE.Float32BufferAttribute(accColors, 3))
   state.pointGeometry.computeBoundingSphere()
   pointCount.value = accPositions.length / 3
+}
+
+function trimCloud() {
+  if (accPositions.length / 3 > MAX_WORLD_POINTS) {
+    const remove = Math.floor(MAX_WORLD_POINTS * 0.15) * 3
+    accPositions.splice(0, remove)
+    accColors.splice(0, remove)
+  }
+}
+
+// ──────────────── WebXR AR ────────────────
+
+async function checkXRSupport() {
+  if (navigator.xr) {
+    try {
+      xrSupported.value = await navigator.xr.isSessionSupported('immersive-ar')
+    } catch {
+      xrSupported.value = false
+    }
+  }
+}
+
+async function startAR() {
+  const state = sceneState.value
+  if (!state || !navigator.xr) return
+
+  try {
+    statusMessage.value = 'Démarrage AR...'
+    if (scanning.value) stopScan()
+    if (cameraActive.value) stopCamera()
+
+    const init: XRSessionInit = {
+      requiredFeatures: ['local-floor', 'hit-test'],
+      optionalFeatures: ['dom-overlay', 'depth-sensing', 'anchors'],
+    }
+    if (arOverlayRef.value) {
+      ;(init as any).domOverlay = { root: arOverlayRef.value }
+    }
+    ;(init as any).depthSensing = {
+      usagePreference: ['cpu-optimized', 'gpu-optimized'],
+      dataFormatPreference: ['luminance-alpha', 'float32']
+    }
+
+    const session = await navigator.xr.requestSession('immersive-ar', init)
+    xrSession = session
+    session.addEventListener('end', onXREnd)
+
+    if (renderRafId) { cancelAnimationFrame(renderRafId); renderRafId = 0 }
+    state.renderer.xr.enabled = true
+    state.renderer.xr.setReferenceSpaceType('local-floor')
+    await state.renderer.xr.setSession(session)
+
+    state.scene.background = null
+    state.grid.visible = false
+    state.axes.visible = false
+
+    localRefSpace = await session.requestReferenceSpace('local-floor')
+    const viewerSpace = await session.requestReferenceSpace('viewer')
+    hitTestSource = (await session.requestHitTestSource!({ space: viewerSpace })) ?? null
+
+    const geo = new THREE.RingGeometry(0.06, 0.09, 32).rotateX(-Math.PI / 2)
+    const mat = new THREE.MeshBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.85 })
+    reticleMesh = new THREE.Mesh(geo, mat)
+    reticleMesh.visible = false
+    reticleMesh.matrixAutoUpdate = false
+    state.scene.add(reticleMesh)
+
+    xrController = state.renderer.xr.getController(0)
+    xrController.addEventListener('select', onXRTap)
+    state.scene.add(xrController)
+
+    xrFrameCount = 0
+    state.renderer.setAnimationLoop((_t: number, frame?: XRFrame) => {
+      if (frame) xrRenderFrame(frame, state)
+    })
+
+    xrActive.value = true
+    statusMessage.value = 'AR actif — visez une surface, tapez pour placer un marqueur'
+  } catch (err) {
+    statusMessage.value = `Erreur AR : ${err instanceof Error ? err.message : err}`
+  }
+}
+
+function xrRenderFrame(frame: XRFrame, state: NonNullable<typeof sceneState.value>) {
+  if (hitTestSource && localRefSpace) {
+    const results = frame.getHitTestResults(hitTestSource)
+    if (results.length > 0 && reticleMesh) {
+      const pose = results[0].getPose(localRefSpace)
+      if (pose) {
+        reticleMesh.visible = true
+        reticleMesh.matrix.fromArray(pose.transform.matrix)
+        lastHitPose = pose
+      }
+    } else if (reticleMesh) {
+      reticleMesh.visible = false
+      lastHitPose = null
+    }
+
+    // Sparse cloud from hit-test center ray
+    if (results.length > 0 && xrFrameCount % 3 === 0) {
+      const p = results[0].getPose(localRefSpace)
+      if (p) {
+        const pos = p.transform.position
+        accPositions.push(pos.x, pos.y, pos.z)
+        accColors.push(0.3, 0.85, 0.5)
+        trimCloud()
+        if (xrFrameCount % 30 === 0) syncCloudToScene()
+      }
+    }
+  }
+
+  // Depth sensing cloud (when available)
+  if (localRefSpace && xrFrameCount % 5 === 0) {
+    const viewerPose = frame.getViewerPose(localRefSpace)
+    if (viewerPose) sampleDepthCloud(frame, viewerPose)
+  }
+
+  xrFrameCount++
+  state.renderer.render(state.scene, state.camera)
+}
+
+function sampleDepthCloud(frame: XRFrame, viewerPose: XRViewerPose) {
+  for (const view of viewerPose.views) {
+    const depthInfo = (frame as any).getDepthInformation?.(view)
+    if (!depthInfo) continue
+    const { width, height } = depthInfo
+    const step = Math.max(4, Math.floor(width / 40))
+    const projInv = new THREE.Matrix4().fromArray(view.projectionMatrix).invert()
+    const v2w = new THREE.Matrix4().fromArray(view.transform.matrix)
+    for (let y = 0; y < height; y += step) {
+      for (let x = 0; x < width; x += step) {
+        const depth: number = depthInfo.getDepthInMeters(x / width, y / height)
+        if (depth <= 0.1 || depth > 6) continue
+        const ndcX = (x / width) * 2 - 1
+        const ndcY = 1 - (y / height) * 2
+        const clip = new THREE.Vector4(ndcX, ndcY, -1, 1).applyMatrix4(projInv)
+        const dir = new THREE.Vector3(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w).normalize()
+        const wp = dir.multiplyScalar(depth).applyMatrix4(v2w)
+        accPositions.push(wp.x, wp.y, wp.z)
+        const norm = Math.min(depth / 6, 1)
+        accColors.push(1 - norm * 0.6, 0.4 + norm * 0.3, 0.3 + norm * 0.5)
+      }
+    }
+    captureCount.value++
+  }
+  trimCloud()
+  syncCloudToScene()
+}
+
+function onXRTap() {
+  if (!reticleMesh?.visible || !lastHitPose) return
+  const pos = new THREE.Vector3()
+  pos.setFromMatrixPosition(new THREE.Matrix4().fromArray(lastHitPose.transform.matrix))
+  const id = nextMarkerId++
+  const marker: Marker = { id, wx: pos.x, wy: pos.y, wz: pos.z, label: `M${id}` }
+  markers.value.push(marker)
+  addMarker3D(marker)
+  statusMessage.value = `Marqueur ${marker.label} à (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`
+}
+
+function onXREnd() {
+  const state = sceneState.value
+  if (reticleMesh && state) {
+    state.scene.remove(reticleMesh)
+    reticleMesh.geometry.dispose()
+    ;(reticleMesh.material as THREE.Material).dispose()
+    reticleMesh = null
+  }
+  if (xrController && state) {
+    xrController.removeEventListener('select', onXRTap)
+    state.scene.remove(xrController)
+    xrController = null
+  }
+  hitTestSource = null
+  localRefSpace = null
+  lastHitPose = null
+  xrSession = null
+  xrActive.value = false
+  if (state) {
+    state.renderer.xr.enabled = false
+    state.renderer.setAnimationLoop(null)
+    state.scene.background = new THREE.Color('#0b0f16')
+    state.grid.visible = true
+    state.axes.visible = true
+    const loop = () => {
+      const s = sceneState.value
+      if (!s) return
+      s.controls.update()
+      s.renderer.render(s.scene, s.camera)
+      renderRafId = requestAnimationFrame(loop)
+    }
+    loop()
+  }
+  nextTick(() => updateSize())
+  statusMessage.value = `AR terminé — ${pointCount.value} points, ${markers.value.length} marqueurs`
+}
+
+async function stopAR() {
+  if (xrSession) await xrSession.end()
 }
 
 // ──────────────── Orientation ────────────────
@@ -275,19 +493,13 @@ function captureSnapshot() {
   const rot = viewToWorldMatrix()
   const v = new THREE.Vector3()
 
-  const currentCount = accPositions.length / 3
-  if (currentCount + frameViewPts.length > MAX_WORLD_POINTS) {
-    const remove = Math.min(currentCount, Math.floor(MAX_WORLD_POINTS * 0.15)) * 3
-    accPositions.splice(0, remove)
-    accColors.splice(0, remove)
-  }
-
   for (const pt of frameViewPts) {
     v.set(pt.vx, pt.vy, pt.vz)
     v.applyMatrix4(rot)
     accPositions.push(v.x, v.y, v.z)
     accColors.push(pt.cr, pt.cg, pt.cb)
   }
+  trimCloud()
 
   captureCount.value++
   lastCaptureYaw = currentYaw()
@@ -573,12 +785,14 @@ onMounted(async () => {
   updateSize()
   window.addEventListener('resize', updateSize)
   initOrientation()
+  checkXRSupport()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateSize)
   window.removeEventListener('deviceorientation', onDeviceOrientation, true)
   stopCamera()
+  if (xrSession) xrSession.end()
 
   if (renderRafId) {
     cancelAnimationFrame(renderRafId)
@@ -597,56 +811,60 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="scanner-page">
-    <section class="panel controls">
+  <main class="scanner-page" :class="{ 'ar-active': xrActive }">
+    <section v-show="!xrActive" class="panel controls">
       <h1>RoomScanner</h1>
       <p>
-        Open camera, rotate slowly to build a 3D room model, and place markers on objects.
+        Scannez votre pièce en 3D et marquez des objets.
+        Les marqueurs restent ancrés dans l'espace réel.
       </p>
 
       <div class="actions">
-        <button class="btn primary" type="button" @click="openCamera" :disabled="cameraActive">
-          Open Camera
+        <button v-if="xrSupported" class="btn ar-btn" type="button" @click="startAR" :disabled="xrActive">
+          Lancer AR
+        </button>
+        <button class="btn primary" type="button" @click="openCamera" :disabled="cameraActive || xrActive">
+          Ouvrir Caméra
         </button>
         <button class="btn" type="button" @click="stopCamera" :disabled="!cameraActive">
-          Close Camera
+          Fermer Caméra
         </button>
         <button class="btn success" type="button" @click="startScan" :disabled="!canScan || scanning">
-          Start Scan
+          Scanner
         </button>
         <button class="btn" type="button" @click="stopScan" :disabled="!scanning">
-          Stop Scan
+          Arrêter
         </button>
         <button class="btn primary" type="button" @click="manualCapture" :disabled="!scanning">
-          Capture
+          Capturer
         </button>
         <button class="btn" type="button" @click="resetCloud">
-          Reset Cloud
+          Réinitialiser
         </button>
         <button class="btn warn" type="button" @click="clearMarkers" :disabled="markers.length === 0">
-          Clear Markers
+          Effacer Marqueurs
         </button>
       </div>
 
       <div v-if="!hasGyro && scanning" class="yaw-control">
-        <label>Manual Yaw (rotation): {{ manualYaw }}°</label>
+        <label>Rotation manuelle : {{ manualYaw }}°</label>
         <input type="range" min="0" max="360" step="1" v-model.number="manualYaw" />
-        <small>No gyroscope detected. Use this slider to simulate rotation.</small>
+        <small>Pas de gyroscope détecté. Utilisez ce curseur pour simuler la rotation.</small>
       </div>
 
       <div class="status-grid">
-        <span>Status</span>
+        <span>Statut</span>
         <strong>{{ statusMessage }}</strong>
         <span>Points</span>
         <strong>{{ pointCount }}</strong>
         <span>Captures</span>
         <strong>{{ captureCount }}</strong>
-        <span>Markers</span>
+        <span>Marqueurs</span>
         <strong>{{ markers.length }}</strong>
+        <span>Mode</span>
+        <strong>{{ xrSupported ? 'WebXR disponible' : 'Desktop (pas de WebXR)' }}</strong>
         <span>Gyro</span>
-        <strong>{{ hasGyro ? 'Active' : 'Manual' }}</strong>
-        <span>Axes</span>
-        <strong>X (red), Y (green), Z (blue)</strong>
+        <strong>{{ hasGyro ? 'Actif' : 'Manuel' }}</strong>
       </div>
 
       <div v-if="markers.length" class="marker-list">
@@ -656,7 +874,7 @@ onBeforeUnmount(() => {
           <span class="marker-coords">
             ({{ mk.wx.toFixed(2) }}, {{ mk.wy.toFixed(2) }}, {{ mk.wz.toFixed(2) }})
           </span>
-          <button class="marker-remove" type="button" @click="removeMarker(mk.id)" title="Remove marker">&times;</button>
+          <button class="marker-remove" type="button" @click="removeMarker(mk.id)" title="Supprimer marqueur">&times;</button>
         </div>
       </div>
 
@@ -664,25 +882,54 @@ onBeforeUnmount(() => {
       <canvas ref="scannerCanvasRef" class="hidden-canvas"></canvas>
     </section>
 
-    <section class="panel viewer">
+    <section v-show="!xrActive" class="panel viewer">
       <div ref="sceneContainerRef" class="scene-host"></div>
       <small>
-        Accumulated 3D room reconstruction. Rotate slowly to build the model.
+        Reconstruction 3D accumulée. Les marqueurs apparaissent comme des sphères rouges.
       </small>
     </section>
 
-    <section class="panel overlay-panel">
+    <section v-show="!xrActive" class="panel overlay-panel">
       <h2>AR Overlay</h2>
       <div class="overlay-host">
         <canvas ref="overlayCanvasRef" class="overlay-canvas" @click="onOverlayClick"></canvas>
         <div v-if="!scanning" class="overlay-placeholder">
-          Start scanning to see points overlaid on camera
+          Lancez le scan pour voir les points sur la caméra
         </div>
       </div>
       <small>
-        Click to place a marker. Markers stay fixed in world space as you move.
+        Cliquez pour poser un marqueur. Les marqueurs restent fixes dans l'espace.
       </small>
     </section>
+
+    <!-- AR DOM Overlay (WebXR) -->
+    <div ref="arOverlayRef" class="ar-overlay" :class="{ active: xrActive }">
+      <div class="ar-hud">
+        <div class="ar-top">
+          <span class="ar-badge">AR</span>
+          <span class="ar-status">{{ statusMessage }}</span>
+        </div>
+        <div class="ar-stats">
+          <span>{{ markers.length }} marqueurs</span>
+          <span>{{ pointCount }} points</span>
+        </div>
+        <div v-if="markers.length" class="ar-marker-list">
+          <div v-for="mk in markers" :key="mk.id" class="ar-marker-item">
+            <span class="marker-dot"></span>
+            <span>{{ mk.label }}</span>
+            <span class="ar-mk-coords">
+              ({{ mk.wx.toFixed(2) }}, {{ mk.wy.toFixed(2) }}, {{ mk.wz.toFixed(2) }})
+            </span>
+            <button type="button" @click="removeMarker(mk.id)">&times;</button>
+          </div>
+        </div>
+        <div class="ar-bottom">
+          <button class="ar-btn-action" type="button" @click="resetCloud">Réinitialiser</button>
+          <div class="ar-reticle-hint">Tapez pour placer un marqueur</div>
+          <button class="ar-btn-action exit" type="button" @click="stopAR">Quitter AR</button>
+        </div>
+      </div>
+    </div>
   </main>
 </template>
 
@@ -701,6 +948,12 @@ onBeforeUnmount(() => {
     #04080f;
   color: #eef4f9;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.scanner-page.ar-active {
+  display: block;
+  padding: 0;
+  background: transparent;
 }
 
 .panel {
@@ -759,6 +1012,14 @@ p {
 
 .btn.warn {
   background: rgba(140, 60, 30, 0.85);
+}
+
+.btn.ar-btn {
+  grid-column: 1 / -1;
+  background: linear-gradient(135deg, rgba(0, 180, 100, 0.85), rgba(0, 120, 180, 0.85));
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
 }
 
 .status-grid {
@@ -938,5 +1199,138 @@ small {
   .overlay-host {
     min-height: 300px;
   }
+}
+
+/* ═══ AR Overlay (WebXR DOM) ═══ */
+
+.ar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.ar-overlay.active {
+  display: flex;
+  flex-direction: column;
+}
+
+.ar-hud {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 1rem;
+}
+
+.ar-top {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  border-radius: 12px;
+  padding: 0.6rem 1rem;
+  align-self: flex-start;
+}
+
+.ar-badge {
+  background: #00e676;
+  color: #000;
+  font-weight: 700;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+}
+
+.ar-status {
+  font-size: 0.9rem;
+  color: #eee;
+}
+
+.ar-stats {
+  pointer-events: auto;
+  display: flex;
+  gap: 1rem;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  border-radius: 10px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.82rem;
+  color: #b0d0e8;
+  align-self: flex-start;
+  margin-top: 0.4rem;
+}
+
+.ar-marker-list {
+  pointer-events: auto;
+  max-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-self: flex-start;
+  margin-top: auto;
+  margin-bottom: 0.5rem;
+}
+
+.ar-marker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 48, 85, 0.2);
+  border: 1px solid rgba(255, 48, 85, 0.4);
+  border-radius: 8px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.82rem;
+  color: #ffd4dc;
+}
+
+.ar-marker-item button {
+  background: none;
+  border: none;
+  color: #ff6080;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0 0.2rem;
+}
+
+.ar-mk-coords {
+  font-family: monospace;
+  color: #b0d0e8;
+  font-size: 0.75rem;
+}
+
+.ar-bottom {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  border-radius: 12px;
+  padding: 0.6rem 1rem;
+}
+
+.ar-btn-action {
+  background: rgba(35, 66, 90, 0.85);
+  border: 1px solid rgba(147, 188, 209, 0.5);
+  color: #eef4f9;
+  padding: 0.45rem 0.9rem;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+
+.ar-btn-action.exit {
+  background: rgba(160, 40, 40, 0.85);
+  border-color: rgba(255, 100, 100, 0.5);
+}
+
+.ar-reticle-hint {
+  font-size: 0.8rem;
+  color: #90c0d0;
 }
 </style>
