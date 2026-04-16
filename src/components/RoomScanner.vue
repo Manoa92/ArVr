@@ -40,6 +40,10 @@ let lastHitPose: XRPose | null = null
 let xrFrameCount = 0
 let xrController: THREE.Group | null = null
 
+// Anchor tracking for stable marker placement
+let anchorMap = new Map<number, any>()
+let pendingMarkerPlacement = false
+
 // Accumulated world-space point cloud
 let accPositions: number[] = []
 let accColors: number[] = []
@@ -248,6 +252,34 @@ function xrRenderFrame(frame: XRFrame, state: NonNullable<typeof sceneState.valu
       lastHitPose = null
     }
 
+    // Process pending marker placement with anchor for stable tracking
+    if (pendingMarkerPlacement && results.length > 0 && localRefSpace) {
+      pendingMarkerPlacement = false
+      const hitResult = results[0]
+      const pose = hitResult.getPose(localRefSpace)
+      if (pose) {
+        const pos = pose.transform.position
+        const id = nextMarkerId++
+        const marker: Marker = { id, wx: pos.x, wy: pos.y, wz: pos.z, label: `M${id}` }
+        markers.value.push(marker)
+        addMarker3D(marker)
+        statusMessage.value = `Marqueur ${marker.label} à (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`
+
+        // Create anchor — prefer hit-test anchor (surface-aware), fallback to frame anchor
+        const createFromHit = (hitResult as any).createAnchor
+        const createFromFrame = (frame as any).createAnchor
+        if (typeof createFromHit === 'function') {
+          createFromHit.call(hitResult).then((anchor: any) => {
+            anchorMap.set(id, anchor)
+          }).catch(() => {})
+        } else if (typeof createFromFrame === 'function') {
+          createFromFrame.call(frame, pose.transform, localRefSpace).then((anchor: any) => {
+            anchorMap.set(id, anchor)
+          }).catch(() => {})
+        }
+      }
+    }
+
     // Sparse cloud from hit-test center ray
     if (results.length > 0 && xrFrameCount % 6 === 0) {
       const p = results[0].getPose(localRefSpace)
@@ -257,6 +289,22 @@ function xrRenderFrame(frame: XRFrame, state: NonNullable<typeof sceneState.valu
         accColors.push(0.3, 0.85, 0.5)
         trimCloud()
         if (xrFrameCount % 60 === 0) syncCloudToScene()
+      }
+    }
+  }
+
+  // Update anchored marker positions each frame (compensates for tracking drift)
+  if (localRefSpace && anchorMap.size > 0) {
+    for (const [markerId, anchor] of anchorMap) {
+      const anchorSpace = anchor.anchorSpace
+      if (!anchorSpace) continue
+      const anchorPose = frame.getPose(anchorSpace, localRefSpace)
+      if (anchorPose) {
+        const p = anchorPose.transform.position
+        const mesh = markerMeshes.find(m => m.name === `marker-${markerId}`)
+        if (mesh) mesh.position.set(p.x, p.y, p.z)
+        const mk = markers.value.find(m => m.id === markerId)
+        if (mk) { mk.wx = p.x; mk.wy = p.y; mk.wz = p.z }
       }
     }
   }
@@ -301,16 +349,18 @@ function sampleDepthCloud(frame: XRFrame, viewerPose: XRViewerPose) {
 
 function onXRTap() {
   if (!reticleMesh?.visible || !lastHitPose) return
-  const pos = new THREE.Vector3()
-  pos.setFromMatrixPosition(new THREE.Matrix4().fromArray(lastHitPose.transform.matrix))
-  const id = nextMarkerId++
-  const marker: Marker = { id, wx: pos.x, wy: pos.y, wz: pos.z, label: `M${id}` }
-  markers.value.push(marker)
-  addMarker3D(marker)
-  statusMessage.value = `Marqueur ${marker.label} à (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`
+  // Defer actual placement to next render frame so we can create an anchor
+  pendingMarkerPlacement = true
 }
 
 function onXREnd() {
+  // Clean up anchors
+  for (const anchor of anchorMap.values()) {
+    if (typeof anchor.delete === 'function') anchor.delete()
+  }
+  anchorMap.clear()
+  pendingMarkerPlacement = false
+
   const state = sceneState.value
   if (reticleMesh && state) {
     state.scene.remove(reticleMesh)
@@ -396,6 +446,13 @@ function addMarker3D(marker: Marker) {
 }
 
 function removeMarker(id: number) {
+  // Delete anchor if it exists
+  const anchor = anchorMap.get(id)
+  if (anchor) {
+    if (typeof anchor.delete === 'function') anchor.delete()
+    anchorMap.delete(id)
+  }
+
   markers.value = markers.value.filter(m => m.id !== id)
 
   const state = sceneState.value
@@ -414,6 +471,12 @@ function removeMarker(id: number) {
 }
 
 function clearMarkers() {
+  // Delete all anchors
+  for (const anchor of anchorMap.values()) {
+    if (typeof anchor.delete === 'function') anchor.delete()
+  }
+  anchorMap.clear()
+
   const state = sceneState.value
   for (const mesh of markerMeshes) {
     if (state) {
