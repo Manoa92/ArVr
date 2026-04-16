@@ -14,6 +14,7 @@ const pointCount = ref(0)
 const captureCount = ref(0)
 const xrSupported = ref(false)
 const xrActive = ref(false)
+const showInfoPopup = ref(false)
 
 interface Marker {
   id: number
@@ -781,7 +782,25 @@ onBeforeUnmount(() => {
         <div class="ar-top">
           <span class="ar-badge">AR</span>
           <span class="ar-status">{{ statusMessage }}</span>
+          <button class="ar-info-btn" type="button" @click="showInfoPopup = !showInfoPopup" title="Aide">
+            &#9432;
+          </button>
         </div>
+
+        <!-- Info popup -->
+        <Transition name="info-fade">
+          <div v-if="showInfoPopup" class="ar-info-popup">
+            <button class="ar-info-close" type="button" @click="showInfoPopup = false">&times;</button>
+            <h3>Comment scanner votre pièce</h3>
+            <ol>
+              <li><strong>Tournez sur place</strong> (360°) depuis le centre pour capturer la vue d'ensemble.</li>
+              <li><strong>Longez chaque mur</strong> à 1-2 m de distance en pointant la caméra vers lui.</li>
+              <li><strong>Approchez-vous des coins</strong> et des objets importants.</li>
+              <li><strong>Bougez lentement</strong> — les mouvements brusques dégradent le tracking.</li>
+            </ol>
+            <p class="ar-info-tip">💡 Se déplacer donne un scan beaucoup plus précis que tourner sur place. La profondeur est optimale à moins de 3 m.</p>
+          </div>
+        </Transition>
         <div class="ar-stats">
           <span>{{ markers.length }} marqueurs</span>
           <span>{{ pointCount }} points</span>
@@ -1107,6 +1126,98 @@ small {
   border-radius: 12px;
   padding: 0.6rem 1rem;
   align-self: flex-start;
+}
+
+.ar-info-btn {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.ar-info-btn:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.ar-info-popup {
+  pointer-events: auto;
+  position: absolute;
+  top: 3.8rem;
+  right: 1rem;
+  width: min(320px, calc(100vw - 2rem));
+  background: rgba(8, 18, 32, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(100, 180, 220, 0.35);
+  border-radius: 14px;
+  padding: 1rem 1.1rem;
+  color: #e0eef6;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  z-index: 10;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.ar-info-popup h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+  color: #fff;
+}
+
+.ar-info-popup ol {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.ar-info-popup li {
+  margin-bottom: 0.35rem;
+}
+
+.ar-info-tip {
+  margin: 0.7rem 0 0;
+  padding: 0.5rem 0.65rem;
+  background: rgba(0, 180, 120, 0.15);
+  border: 1px solid rgba(0, 180, 120, 0.3);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: #a0e8d0;
+}
+
+.ar-info-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.6rem;
+  background: none;
+  border: none;
+  color: #90b0c8;
+  font-size: 1.3rem;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 0.2rem;
+}
+
+.ar-info-close:hover {
+  color: #fff;
+}
+
+.info-fade-enter-active,
+.info-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.info-fade-enter-from,
+.info-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
 }
 
 .ar-badge {
