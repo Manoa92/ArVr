@@ -1,11 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 const videoRef = ref<HTMLVideoElement | null>(null)
-const scannerCanvasRef = ref<HTMLCanvasElement | null>(null)
-const overlayCanvasRef = ref<HTMLCanvasElement | null>(null)
 const sceneContainerRef = ref<HTMLDivElement | null>(null)
 const arOverlayRef = ref<HTMLDivElement | null>(null)
 
@@ -14,8 +12,6 @@ const scanning = ref(false)
 const statusMessage = ref('Camera is off')
 const pointCount = ref(0)
 const captureCount = ref(0)
-const hasGyro = ref(false)
-const manualYaw = ref(0) // degrees, desktop fallback
 const xrSupported = ref(false)
 const xrActive = ref(false)
 
@@ -44,27 +40,11 @@ let lastHitPose: XRPose | null = null
 let xrFrameCount = 0
 let xrController: THREE.Group | null = null
 
-// Orientation from device
-let orientAlpha = 0
-let orientBeta = 0
-
 // Accumulated world-space point cloud
 let accPositions: number[] = []
 let accColors: number[] = []
 
-// Per-frame view-space data (for overlay + click)
-let frameViewPts: { px: number; py: number; vx: number; vy: number; vz: number; cr: number; cg: number; cb: number; depth: number }[] = []
-
-let lastCaptureYaw = -999
-const AUTO_CAPTURE_ANGLE = 8 * Math.PI / 180
-const SAMPLE_W = 80
-const SAMPLE_H = 60
 const MAX_WORLD_POINTS = 80000
-
-// Pinhole camera model
-const HFOV = 55 * Math.PI / 180
-const TAN_HALF_H = Math.tan(HFOV / 2)
-const TAN_HALF_V = TAN_HALF_H * (SAMPLE_H / SAMPLE_W)
 
 const sceneState = shallowRef<{
   scene: THREE.Scene
@@ -77,8 +57,6 @@ const sceneState = shallowRef<{
   grid: THREE.GridHelper
   axes: THREE.AxesHelper
 } | null>(null)
-
-const canScan = computed(() => cameraActive.value && !xrActive.value)
 
 function createThreeScene() {
   const container = sceneContainerRef.value
@@ -373,273 +351,6 @@ async function stopAR() {
   if (xrSession) await xrSession.end()
 }
 
-// ──────────────── Orientation ────────────────
-
-function onDeviceOrientation(e: DeviceOrientationEvent) {
-  if (e.alpha == null || e.beta == null) return
-  hasGyro.value = true
-  orientAlpha = e.alpha * Math.PI / 180
-  orientBeta = (e.beta ?? 0) * Math.PI / 180
-}
-
-async function initOrientation() {
-  const DOE = DeviceOrientationEvent as any
-  if (typeof DOE.requestPermission === 'function') {
-    try {
-      const result = await DOE.requestPermission()
-      if (result === 'granted') {
-        window.addEventListener('deviceorientation', onDeviceOrientation, true)
-      }
-    } catch { /* denied */ }
-  } else {
-    window.addEventListener('deviceorientation', onDeviceOrientation, true)
-  }
-}
-
-function currentYaw(): number {
-  return hasGyro.value ? orientAlpha : (manualYaw.value * Math.PI / 180)
-}
-
-function currentPitch(): number {
-  return hasGyro.value ? orientBeta : 0
-}
-
-function viewToWorldMatrix(): THREE.Matrix4 {
-  const m = new THREE.Matrix4()
-  m.makeRotationFromEuler(new THREE.Euler(-currentPitch(), currentYaw(), 0, 'YXZ'))
-  return m
-}
-
-function worldToViewMatrix(): THREE.Matrix4 {
-  return viewToWorldMatrix().clone().invert()
-}
-
-// ──────────────── Projection ────────────────
-
-function projectWorldToScreen(wx: number, wy: number, wz: number, dw: number, dh: number): { sx: number; sy: number; visible: boolean } {
-  const inv = worldToViewMatrix()
-  const v = new THREE.Vector3(wx, wy, wz)
-  v.applyMatrix4(inv)
-
-  if (v.z >= -0.05) return { sx: 0, sy: 0, visible: false }
-
-  const negZ = -v.z
-  const ndcX = v.x / (2 * TAN_HALF_H * negZ)
-  const ndcY = v.y / (2 * TAN_HALF_V * negZ)
-
-  const visible = ndcX >= -0.5 && ndcX <= 0.5 && ndcY >= -0.5 && ndcY <= 0.5
-  return {
-    sx: (ndcX + 0.5) * dw,
-    sy: (0.5 - ndcY) * dh,
-    visible
-  }
-}
-
-// ──────────────── Frame Processing ────────────────
-
-function processFrame() {
-  const video = videoRef.value
-  const canvas = scannerCanvasRef.value
-  if (!video || !canvas || video.videoWidth === 0) return
-
-  canvas.width = SAMPLE_W
-  canvas.height = SAMPLE_H
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })
-  if (!ctx) return
-
-  ctx.drawImage(video, 0, 0, SAMPLE_W, SAMPLE_H)
-  const data = ctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H).data
-
-  frameViewPts = []
-  const step = 4
-
-  for (let py = 0; py < SAMPLE_H; py += step) {
-    for (let px = 0; px < SAMPLE_W; px += step) {
-      const i = (py * SAMPLE_W + px) * 4
-      const r = data[i], g = data[i + 1], b = data[i + 2]
-      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
-
-      const depthNorm = (255 - lum) / 255
-      const depth = 1.0 + depthNorm * 3.5
-
-      const ndcX = px / SAMPLE_W - 0.5
-      const ndcY = 0.5 - py / SAMPLE_H
-      const vx = ndcX * 2 * TAN_HALF_H * depth
-      const vy = ndcY * 2 * TAN_HALF_V * depth
-      const vz = -depth
-
-      const nextPx = Math.min(px + 1, SAMPLE_W - 1)
-      const nextPy = Math.min(py + 1, SAMPLE_H - 1)
-      const iX = (py * SAMPLE_W + nextPx) * 4
-      const iY = (nextPy * SAMPLE_W + px) * 4
-      const lumX = 0.2126 * data[iX] + 0.7152 * data[iX + 1] + 0.0722 * data[iX + 2]
-      const lumY = 0.2126 * data[iY] + 0.7152 * data[iY + 1] + 0.0722 * data[iY + 2]
-      const contrast = Math.min(Math.abs(lumX - lum) + Math.abs(lumY - lum), 255) / 255
-
-      frameViewPts.push({
-        px, py, vx, vy, vz,
-        cr: 1 - depthNorm,
-        cg: 0.35 + contrast * 0.45,
-        cb: depthNorm,
-        depth: depthNorm
-      })
-    }
-  }
-}
-
-function captureSnapshot() {
-  if (frameViewPts.length === 0) return
-
-  const rot = viewToWorldMatrix()
-  const v = new THREE.Vector3()
-
-  for (const pt of frameViewPts) {
-    v.set(pt.vx, pt.vy, pt.vz)
-    v.applyMatrix4(rot)
-    accPositions.push(v.x, v.y, v.z)
-    accColors.push(pt.cr, pt.cg, pt.cb)
-  }
-  trimCloud()
-
-  captureCount.value++
-  lastCaptureYaw = currentYaw()
-  syncCloudToScene()
-  statusMessage.value = `Capture #${captureCount.value} — ${pointCount.value} world points`
-}
-
-function drawOverlay() {
-  const video = videoRef.value
-  const canvas = overlayCanvasRef.value
-  if (!video || !canvas || video.videoWidth === 0) return
-
-  const dw = canvas.clientWidth
-  const dh = canvas.clientHeight
-  if (canvas.width !== dw || canvas.height !== dh) {
-    canvas.width = dw
-    canvas.height = dh
-  }
-
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-
-  ctx.drawImage(video, 0, 0, dw, dh)
-
-  const scaleX = dw / SAMPLE_W
-  const scaleY = dh / SAMPLE_H
-  const dotSize = Math.max(2, Math.min(scaleX, scaleY) * 1.6)
-
-  // Draw current-frame overlay points
-  for (const pt of frameViewPts) {
-    const sx = pt.px * scaleX
-    const sy = pt.py * scaleY
-    const alpha = 0.3 + pt.depth * 0.5
-    ctx.fillStyle = `rgba(${Math.round(pt.cr * 255)},${Math.round(pt.cg * 255)},${Math.round(pt.cb * 255)},${alpha.toFixed(2)})`
-    ctx.beginPath()
-    ctx.arc(sx, sy, dotSize, 0, Math.PI * 2)
-    ctx.fill()
-  }
-
-  // Draw markers re-projected from world space
-  for (const mk of markers.value) {
-    const proj = projectWorldToScreen(mk.wx, mk.wy, mk.wz, dw, dh)
-    const radius = Math.max(8, dotSize * 4)
-
-    if (!proj.visible) continue
-
-    const mx = proj.sx
-    const my = proj.sy
-
-    // Outer ring
-    ctx.strokeStyle = '#ffffff'
-    ctx.lineWidth = 2.5
-    ctx.beginPath()
-    ctx.arc(mx, my, radius, 0, Math.PI * 2)
-    ctx.stroke()
-
-    // Inner filled dot
-    ctx.fillStyle = '#ff3055'
-    ctx.beginPath()
-    ctx.arc(mx, my, radius * 0.45, 0, Math.PI * 2)
-    ctx.fill()
-
-    // Crosshair lines
-    ctx.strokeStyle = 'rgba(255,255,255,0.6)'
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    ctx.moveTo(mx - radius * 1.5, my)
-    ctx.lineTo(mx - radius * 0.7, my)
-    ctx.moveTo(mx + radius * 0.7, my)
-    ctx.lineTo(mx + radius * 1.5, my)
-    ctx.moveTo(mx, my - radius * 1.5)
-    ctx.lineTo(mx, my - radius * 0.7)
-    ctx.moveTo(mx, my + radius * 0.7)
-    ctx.lineTo(mx, my + radius * 1.5)
-    ctx.stroke()
-
-    // Label
-    ctx.font = `bold ${Math.max(12, radius * 0.9)}px sans-serif`
-    ctx.fillStyle = '#ffffff'
-    ctx.fillText(mk.label, mx + radius + 4, my - radius * 0.3)
-
-    // Coordinates
-    ctx.font = `${Math.max(10, radius * 0.7)}px monospace`
-    ctx.fillStyle = '#b0d0e8'
-    ctx.fillText(
-      `(${mk.wx.toFixed(2)}, ${mk.wy.toFixed(2)}, ${mk.wz.toFixed(2)})`,
-      mx + radius + 4,
-      my + radius * 0.6
-    )
-  }
-}
-
-function scanLoop() {
-  if (!scanning.value) return
-
-  processFrame()
-
-  // Auto-capture when yaw changes enough
-  const yawDelta = Math.abs(currentYaw() - lastCaptureYaw)
-  const normalizedDelta = Math.min(yawDelta, 2 * Math.PI - yawDelta)
-  if (normalizedDelta >= AUTO_CAPTURE_ANGLE || lastCaptureYaw === -999) {
-    captureSnapshot()
-  }
-
-  drawOverlay()
-  scannerRafId = requestAnimationFrame(scanLoop)
-}
-
-async function openCamera() {
-  if (cameraActive.value) {
-    return
-  }
-
-  try {
-    statusMessage.value = 'Requesting camera access...'
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false
-    })
-
-    const video = videoRef.value
-    if (!video) {
-      throw new Error('Video element is unavailable')
-    }
-
-    video.srcObject = mediaStream
-    await video.play()
-    cameraActive.value = true
-    statusMessage.value = 'Camera is ready'
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown camera error'
-    statusMessage.value = `Camera error: ${message}`
-    cameraActive.value = false
-  }
-}
-
 function stopCamera() {
   if (scannerRafId) {
     cancelAnimationFrame(scannerRafId)
@@ -662,17 +373,6 @@ function stopCamera() {
   statusMessage.value = 'Camera is off'
 }
 
-function startScan() {
-  if (!cameraActive.value || scanning.value) {
-    return
-  }
-
-  scanning.value = true
-  lastCaptureYaw = -999
-  statusMessage.value = 'Scanning — rotate slowly around you...'
-  scanLoop()
-}
-
 function stopScan() {
   scanning.value = false
   if (scannerRafId) {
@@ -680,43 +380,6 @@ function stopScan() {
     scannerRafId = 0
   }
   statusMessage.value = `Scan paused — ${captureCount.value} captures, ${pointCount.value} points`
-}
-
-function onOverlayClick(event: MouseEvent) {
-  const canvas = overlayCanvasRef.value
-  if (!canvas || frameViewPts.length === 0) return
-
-  const rect = canvas.getBoundingClientRect()
-  const clickX = event.clientX - rect.left
-  const clickY = event.clientY - rect.top
-  const scaleX = canvas.clientWidth / SAMPLE_W
-  const scaleY = canvas.clientHeight / SAMPLE_H
-
-  // Find nearest frame point to click
-  let bestDist = Infinity
-  let bestPt = frameViewPts[0]
-  for (const pt of frameViewPts) {
-    const dx = pt.px * scaleX - clickX
-    const dy = pt.py * scaleY - clickY
-    const d = dx * dx + dy * dy
-    if (d < bestDist) { bestDist = d; bestPt = pt }
-  }
-
-  // Convert view-space point to world-space (fixed anchor)
-  const rot = viewToWorldMatrix()
-  const worldPt = new THREE.Vector3(bestPt.vx, bestPt.vy, bestPt.vz).applyMatrix4(rot)
-
-  const id = nextMarkerId++
-  const marker: Marker = {
-    id,
-    wx: worldPt.x,
-    wy: worldPt.y,
-    wz: worldPt.z,
-    label: `M${id}`
-  }
-  markers.value.push(marker)
-  addMarker3D(marker)
-  statusMessage.value = `Marker ${marker.label} placed at (${marker.wx.toFixed(2)}, ${marker.wy.toFixed(2)}, ${marker.wz.toFixed(2)})`
 }
 
 function addMarker3D(marker: Marker) {
@@ -764,17 +427,11 @@ function clearMarkers() {
   nextMarkerId = 1
 }
 
-function manualCapture() {
-  if (frameViewPts.length === 0) return
-  captureSnapshot()
-}
-
 function resetCloud() {
   accPositions = []
   accColors = []
   syncCloudToScene()
   captureCount.value = 0
-  lastCaptureYaw = -999
   clearMarkers()
   statusMessage.value = cameraActive.value ? 'Cloud reset — ready to scan again' : 'Camera is off'
 }
@@ -784,13 +441,11 @@ onMounted(async () => {
   createThreeScene()
   updateSize()
   window.addEventListener('resize', updateSize)
-  initOrientation()
   checkXRSupport()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateSize)
-  window.removeEventListener('deviceorientation', onDeviceOrientation, true)
   stopCamera()
   if (xrSession) xrSession.end()
 
@@ -823,21 +478,6 @@ onBeforeUnmount(() => {
         <button v-if="xrSupported" class="btn ar-btn" type="button" @click="startAR" :disabled="xrActive">
           Lancer AR
         </button>
-        <button class="btn primary" type="button" @click="openCamera" :disabled="cameraActive || xrActive">
-          Ouvrir Caméra
-        </button>
-        <button class="btn" type="button" @click="stopCamera" :disabled="!cameraActive">
-          Fermer Caméra
-        </button>
-        <button class="btn success" type="button" @click="startScan" :disabled="!canScan || scanning">
-          Scanner
-        </button>
-        <button class="btn" type="button" @click="stopScan" :disabled="!scanning">
-          Arrêter
-        </button>
-        <button class="btn primary" type="button" @click="manualCapture" :disabled="!scanning">
-          Capturer
-        </button>
         <button class="btn" type="button" @click="resetCloud">
           Réinitialiser
         </button>
@@ -846,11 +486,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div v-if="!hasGyro && scanning" class="yaw-control">
-        <label>Rotation manuelle : {{ manualYaw }}°</label>
-        <input type="range" min="0" max="360" step="1" v-model.number="manualYaw" />
-        <small>Pas de gyroscope détecté. Utilisez ce curseur pour simuler la rotation.</small>
-      </div>
+
 
       <div class="status-grid">
         <span>Statut</span>
@@ -863,8 +499,6 @@ onBeforeUnmount(() => {
         <strong>{{ markers.length }}</strong>
         <span>Mode</span>
         <strong>{{ xrSupported ? 'WebXR disponible' : 'Desktop (pas de WebXR)' }}</strong>
-        <span>Gyro</span>
-        <strong>{{ hasGyro ? 'Actif' : 'Manuel' }}</strong>
       </div>
 
       <div v-if="markers.length" class="marker-list">
@@ -877,9 +511,6 @@ onBeforeUnmount(() => {
           <button class="marker-remove" type="button" @click="removeMarker(mk.id)" title="Supprimer marqueur">&times;</button>
         </div>
       </div>
-
-      <video ref="videoRef" autoplay muted playsinline></video>
-      <canvas ref="scannerCanvasRef" class="hidden-canvas"></canvas>
     </section>
 
     <section v-show="!xrActive" class="panel viewer">
@@ -889,18 +520,7 @@ onBeforeUnmount(() => {
       </small>
     </section>
 
-    <section v-show="!xrActive" class="panel overlay-panel">
-      <h2>AR Overlay</h2>
-      <div class="overlay-host">
-        <canvas ref="overlayCanvasRef" class="overlay-canvas" @click="onOverlayClick"></canvas>
-        <div v-if="!scanning" class="overlay-placeholder">
-          Lancez le scan pour voir les points sur la caméra
-        </div>
-      </div>
-      <small>
-        Cliquez pour poser un marqueur. Les marqueurs restent fixes dans l'espace.
-      </small>
-    </section>
+
 
     <!-- AR DOM Overlay (WebXR) -->
     <div ref="arOverlayRef" class="ar-overlay" :class="{ active: xrActive }">
@@ -937,7 +557,7 @@ onBeforeUnmount(() => {
 .scanner-page {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: minmax(300px, 380px) 1fr 1fr;
+  grid-template-columns: minmax(300px, 380px) 1fr;
   grid-template-rows: 1fr;
   gap: 1rem;
   padding: 1rem;
