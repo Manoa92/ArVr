@@ -44,11 +44,15 @@ let xrController: THREE.Group | null = null
 let anchorMap = new Map<number, any>()
 let pendingMarkerPlacement = false
 
+// Plane & mesh detection state
+let detectedPlaneMeshes = new Map<any, THREE.Mesh>()
+let detectedRoomMeshes = new Map<any, THREE.Mesh>()
+
 // Accumulated world-space point cloud
 let accPositions: number[] = []
 let accColors: number[] = []
 
-const MAX_WORLD_POINTS = 80000
+const MAX_WORLD_POINTS = 200000
 
 const sceneState = shallowRef<{
   scene: THREE.Scene
@@ -187,7 +191,7 @@ async function startAR() {
 
     const init: XRSessionInit = {
       requiredFeatures: ['local-floor', 'hit-test'],
-      optionalFeatures: ['dom-overlay', 'depth-sensing', 'anchors'],
+      optionalFeatures: ['dom-overlay', 'depth-sensing', 'anchors', 'plane-detection', 'mesh-detection'],
     }
     if (arOverlayRef.value) {
       ;(init as any).domOverlay = { root: arOverlayRef.value }
@@ -280,15 +284,14 @@ function xrRenderFrame(frame: XRFrame, state: NonNullable<typeof sceneState.valu
       }
     }
 
-    // Sparse cloud from hit-test center ray
-    if (results.length > 0 && xrFrameCount % 6 === 0) {
+    // Hit-test cloud — sample every 2 frames for denser coverage
+    if (results.length > 0 && xrFrameCount % 2 === 0) {
       const p = results[0].getPose(localRefSpace)
       if (p) {
         const pos = p.transform.position
         accPositions.push(pos.x, pos.y, pos.z)
         accColors.push(0.3, 0.85, 0.5)
         trimCloud()
-        if (xrFrameCount % 60 === 0) syncCloudToScene()
       }
     }
   }
@@ -309,11 +312,20 @@ function xrRenderFrame(frame: XRFrame, state: NonNullable<typeof sceneState.valu
     }
   }
 
-  // Depth sensing cloud (when available)
-  if (localRefSpace && xrFrameCount % 15 === 0) {
+  // Detected planes → render as semi-transparent geometry
+  if (localRefSpace) {
+    updateDetectedPlanes(frame, state)
+    updateDetectedMeshes(frame, state)
+  }
+
+  // Depth sensing cloud — sample every 4 frames for denser reconstruction
+  if (localRefSpace && xrFrameCount % 4 === 0) {
     const viewerPose = frame.getViewerPose(localRefSpace)
     if (viewerPose) sampleDepthCloud(frame, viewerPose)
   }
+
+  // Sync point cloud to scene periodically
+  if (xrFrameCount % 30 === 0) syncCloudToScene()
 
   xrFrameCount++
   state.renderer.render(state.scene, state.camera)
@@ -324,27 +336,188 @@ function sampleDepthCloud(frame: XRFrame, viewerPose: XRViewerPose) {
     const depthInfo = (frame as any).getDepthInformation?.(view)
     if (!depthInfo) continue
     const { width, height } = depthInfo
-    const step = Math.max(8, Math.floor(width / 20))
+    // Denser sampling: ~40 samples per axis for much better room shape
+    const step = Math.max(4, Math.floor(width / 40))
     const projInv = new THREE.Matrix4().fromArray(view.projectionMatrix).invert()
     const v2w = new THREE.Matrix4().fromArray(view.transform.matrix)
     for (let y = 0; y < height; y += step) {
       for (let x = 0; x < width; x += step) {
         const depth: number = depthInfo.getDepthInMeters(x / width, y / height)
-        if (depth <= 0.1 || depth > 6) continue
+        if (depth <= 0.1 || depth > 8) continue
         const ndcX = (x / width) * 2 - 1
         const ndcY = 1 - (y / height) * 2
         const clip = new THREE.Vector4(ndcX, ndcY, -1, 1).applyMatrix4(projInv)
         const dir = new THREE.Vector3(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w).normalize()
         const wp = dir.multiplyScalar(depth).applyMatrix4(v2w)
         accPositions.push(wp.x, wp.y, wp.z)
-        const norm = Math.min(depth / 6, 1)
+        const norm = Math.min(depth / 8, 1)
         accColors.push(1 - norm * 0.6, 0.4 + norm * 0.3, 0.3 + norm * 0.5)
       }
     }
     captureCount.value++
   }
   trimCloud()
-  syncCloudToScene()
+}
+
+// ──── Plane Detection ────
+
+const PLANE_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x4488cc,
+  transparent: true,
+  opacity: 0.18,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+})
+const PLANE_WIRE_MATERIAL = new THREE.LineBasicMaterial({ color: 0x66aadd, transparent: true, opacity: 0.35 })
+
+function updateDetectedPlanes(frame: XRFrame, state: NonNullable<typeof sceneState.value>) {
+  const detectedPlanes: Set<any> | undefined = (frame as any).detectedPlanes
+  if (!detectedPlanes || !localRefSpace) return
+
+  // Remove old planes no longer tracked
+  for (const [plane, mesh] of detectedPlaneMeshes) {
+    if (!detectedPlanes.has(plane)) {
+      state.scene.remove(mesh)
+      mesh.geometry.dispose()
+      if (mesh.children.length) {
+        const wire = mesh.children[0] as THREE.LineSegments
+        wire.geometry.dispose()
+      }
+      detectedPlaneMeshes.delete(plane)
+    }
+  }
+
+  for (const plane of detectedPlanes) {
+    const planePose = frame.getPose(plane.planeSpace, localRefSpace)
+    if (!planePose) continue
+
+    const polygon: DOMPointReadOnly[] = plane.polygon
+    if (!polygon || polygon.length < 3) continue
+
+    let mesh = detectedPlaneMeshes.get(plane)
+    const lastChanged = plane.lastChangedTime
+
+    if (!mesh || (mesh.userData.lastChanged !== lastChanged)) {
+      // (Re)build geometry from polygon
+      if (mesh) {
+        state.scene.remove(mesh)
+        mesh.geometry.dispose()
+        if (mesh.children.length) (mesh.children[0] as THREE.LineSegments).geometry.dispose()
+      }
+
+      const shape = new THREE.Shape()
+      shape.moveTo(polygon[0].x, polygon[0].z)
+      for (let i = 1; i < polygon.length; i++) shape.lineTo(polygon[i].x, polygon[i].z)
+      shape.closePath()
+
+      const geo = new THREE.ShapeGeometry(shape)
+      geo.rotateX(-Math.PI / 2)
+      mesh = new THREE.Mesh(geo, PLANE_MATERIAL)
+      mesh.renderOrder = -1
+      mesh.userData.lastChanged = lastChanged
+
+      // Wireframe outline
+      const edges = new THREE.EdgesGeometry(geo)
+      const wire = new THREE.LineSegments(edges, PLANE_WIRE_MATERIAL)
+      mesh.add(wire)
+
+      state.scene.add(mesh)
+      detectedPlaneMeshes.set(plane, mesh)
+
+      // Also inject plane boundary as points for the cloud
+      for (const pt of polygon) {
+        const wp = new THREE.Vector3(pt.x, 0, pt.z)
+          .applyMatrix4(new THREE.Matrix4().fromArray(planePose.transform.matrix))
+        accPositions.push(wp.x, wp.y, wp.z)
+        accColors.push(0.27, 0.53, 0.8)
+      }
+    }
+
+    // Update transform each frame
+    mesh.matrixAutoUpdate = false
+    mesh.matrix.fromArray(planePose.transform.matrix)
+  }
+}
+
+// ──── Mesh Detection (room geometry) ────
+
+const ROOM_MESH_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x22ddaa,
+  transparent: true,
+  opacity: 0.12,
+  side: THREE.DoubleSide,
+  wireframe: false,
+  depthWrite: false,
+})
+const ROOM_WIRE_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x22ddaa,
+  transparent: true,
+  opacity: 0.22,
+  wireframe: true,
+  depthWrite: false,
+})
+
+function updateDetectedMeshes(frame: XRFrame, state: NonNullable<typeof sceneState.value>) {
+  const detectedMeshes: Set<any> | undefined = (frame as any).detectedMeshes
+  if (!detectedMeshes || !localRefSpace) return
+
+  // Remove stale
+  for (const [xrMesh, threeMesh] of detectedRoomMeshes) {
+    if (!detectedMeshes.has(xrMesh)) {
+      state.scene.remove(threeMesh)
+      threeMesh.geometry.dispose()
+      if (threeMesh.children.length) (threeMesh.children[0] as THREE.Mesh).geometry.dispose()
+      detectedRoomMeshes.delete(xrMesh)
+    }
+  }
+
+  for (const xrMesh of detectedMeshes) {
+    const meshPose = frame.getPose(xrMesh.meshSpace, localRefSpace)
+    if (!meshPose) continue
+
+    let threeMesh = detectedRoomMeshes.get(xrMesh)
+    const lastChanged = xrMesh.lastChangedTime
+
+    if (!threeMesh || threeMesh.userData.lastChanged !== lastChanged) {
+      if (threeMesh) {
+        state.scene.remove(threeMesh)
+        threeMesh.geometry.dispose()
+        if (threeMesh.children.length) (threeMesh.children[0] as THREE.Mesh).geometry.dispose()
+      }
+
+      const vertices: Float32Array = xrMesh.vertices
+      const indices: Uint32Array = xrMesh.indices
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3))
+      geo.setIndex(new THREE.BufferAttribute(indices, 1))
+      geo.computeVertexNormals()
+
+      threeMesh = new THREE.Mesh(geo, ROOM_MESH_MATERIAL)
+      threeMesh.renderOrder = -2
+      threeMesh.userData.lastChanged = lastChanged
+
+      // Wireframe overlay
+      const wireGeo = new THREE.BufferGeometry()
+      wireGeo.setAttribute('position', new THREE.BufferAttribute(vertices.slice(), 3))
+      wireGeo.setIndex(new THREE.BufferAttribute(indices.slice(), 1))
+      const wireMesh = new THREE.Mesh(wireGeo, ROOM_WIRE_MATERIAL)
+      threeMesh.add(wireMesh)
+
+      state.scene.add(threeMesh)
+      detectedRoomMeshes.set(xrMesh, threeMesh)
+
+      // Inject mesh vertices as dense point cloud
+      for (let i = 0; i < vertices.length; i += 3) {
+        const wp = new THREE.Vector3(vertices[i], vertices[i + 1], vertices[i + 2])
+          .applyMatrix4(new THREE.Matrix4().fromArray(meshPose.transform.matrix))
+        accPositions.push(wp.x, wp.y, wp.z)
+        accColors.push(0.13, 0.87, 0.67)
+      }
+    }
+
+    threeMesh.matrixAutoUpdate = false
+    threeMesh.matrix.fromArray(meshPose.transform.matrix)
+  }
 }
 
 function onXRTap() {
@@ -362,6 +535,23 @@ function onXREnd() {
   pendingMarkerPlacement = false
 
   const state = sceneState.value
+
+  // Clean up detected planes
+  for (const mesh of detectedPlaneMeshes.values()) {
+    if (state) state.scene.remove(mesh)
+    mesh.geometry.dispose()
+    if (mesh.children.length) (mesh.children[0] as THREE.LineSegments).geometry.dispose()
+  }
+  detectedPlaneMeshes.clear()
+
+  // Clean up detected meshes
+  for (const mesh of detectedRoomMeshes.values()) {
+    if (state) state.scene.remove(mesh)
+    mesh.geometry.dispose()
+    if (mesh.children.length) (mesh.children[0] as THREE.Mesh).geometry.dispose()
+  }
+  detectedRoomMeshes.clear()
+
   if (reticleMesh && state) {
     state.scene.remove(reticleMesh)
     reticleMesh.geometry.dispose()
