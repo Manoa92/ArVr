@@ -897,7 +897,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="ar-bottom">
           <button class="ar-btn-action" type="button" @click="resetCloud">Réinitialiser</button>
-          <button class="ar-btn-action clean" type="button" @click="cleanCloudManual">Nettoyer</button>
+          <!-- <button class="ar-btn-action clean" type="button" @click="cleanCloudManual">Nettoyer</button> -->
           <div class="ar-reticle-hint">Tapez pour placer un marqueur</div>
           <button class="ar-btn-action exit" type="button" @click="stopAR">Quitter AR</button>
         </div>
