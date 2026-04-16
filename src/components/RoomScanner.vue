@@ -169,6 +169,78 @@ function trimCloud() {
   }
 }
 
+/**
+ * Voxel-based outlier removal:
+ * - Grid the point cloud into voxels of `cellSize` meters
+ * - Remove points in voxels with fewer than `minNeighbors` points (isolated = noise)
+ */
+function cleanCloud(cellSize = 0.12, minNeighbors = 3) {
+  const count = accPositions.length / 3
+  if (count < 50) return 0
+
+  // Hash points into voxel grid
+  const voxelCounts = new Map<string, number>()
+  const voxelKeys: string[] = new Array(count)
+  const invCell = 1 / cellSize
+
+  for (let i = 0; i < count; i++) {
+    const ix = Math.floor(accPositions[i * 3] * invCell)
+    const iy = Math.floor(accPositions[i * 3 + 1] * invCell)
+    const iz = Math.floor(accPositions[i * 3 + 2] * invCell)
+    const key = `${ix},${iy},${iz}`
+    voxelKeys[i] = key
+    voxelCounts.set(key, (voxelCounts.get(key) || 0) + 1)
+  }
+
+  // Check neighbor voxels: a point is kept if its voxel + adjacent voxels have enough points
+  const newPositions: number[] = []
+  const newColors: number[] = []
+  let removed = 0
+
+  for (let i = 0; i < count; i++) {
+    const key = voxelKeys[i]
+    const selfCount = voxelCounts.get(key) || 0
+
+    if (selfCount >= minNeighbors) {
+      newPositions.push(accPositions[i * 3], accPositions[i * 3 + 1], accPositions[i * 3 + 2])
+      newColors.push(accColors[i * 3], accColors[i * 3 + 1], accColors[i * 3 + 2])
+    } else {
+      // Check 26-connected neighborhood
+      const parts = key.split(',')
+      const cx = parseInt(parts[0]), cy = parseInt(parts[1]), cz = parseInt(parts[2])
+      let total = selfCount
+      outer:
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            if (dx === 0 && dy === 0 && dz === 0) continue
+            total += voxelCounts.get(`${cx + dx},${cy + dy},${cz + dz}`) || 0
+            if (total >= minNeighbors) break outer
+          }
+        }
+      }
+      if (total >= minNeighbors) {
+        newPositions.push(accPositions[i * 3], accPositions[i * 3 + 1], accPositions[i * 3 + 2])
+        newColors.push(accColors[i * 3], accColors[i * 3 + 1], accColors[i * 3 + 2])
+      } else {
+        removed++
+      }
+    }
+  }
+
+  accPositions = newPositions
+  accColors = newColors
+  syncCloudToScene()
+  return removed
+}
+
+function cleanCloudManual() {
+  const removed = cleanCloud()
+  statusMessage.value = removed > 0
+    ? `${removed} points aberrants supprimés — ${pointCount.value} restants`
+    : `Aucun point aberrant détecté`
+}
+
 // ──────────────── WebXR AR ────────────────
 
 async function checkXRSupport() {
@@ -327,6 +399,11 @@ function xrRenderFrame(frame: XRFrame, state: NonNullable<typeof sceneState.valu
 
   // Sync point cloud to scene periodically
   if (xrFrameCount % 30 === 0) syncCloudToScene()
+
+  // Auto-clean outliers every ~6 seconds (180 frames at 30fps)
+  if (xrFrameCount > 0 && xrFrameCount % 180 === 0 && accPositions.length / 3 > 200) {
+    cleanCloud()
+  }
 
   xrFrameCount++
   state.renderer.render(state.scene, state.camera)
@@ -735,6 +812,9 @@ onBeforeUnmount(() => {
         <button class="btn" type="button" @click="resetCloud">
           Réinitialiser
         </button>
+        <button class="btn success" type="button" @click="cleanCloudManual" :disabled="pointCount === 0">
+          Nettoyer
+        </button>
         <button class="btn warn" type="button" @click="clearMarkers" :disabled="markers.length === 0">
           Effacer Marqueurs
         </button>
@@ -817,6 +897,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="ar-bottom">
           <button class="ar-btn-action" type="button" @click="resetCloud">Réinitialiser</button>
+          <button class="ar-btn-action clean" type="button" @click="cleanCloudManual">Nettoyer</button>
           <div class="ar-reticle-hint">Tapez pour placer un marqueur</div>
           <button class="ar-btn-action exit" type="button" @click="stopAR">Quitter AR</button>
         </div>
@@ -1311,6 +1392,11 @@ small {
 .ar-btn-action.exit {
   background: rgba(160, 40, 40, 0.85);
   border-color: rgba(255, 100, 100, 0.5);
+}
+
+.ar-btn-action.clean {
+  background: rgba(24, 100, 80, 0.85);
+  border-color: rgba(0, 200, 150, 0.45);
 }
 
 .ar-reticle-hint {
