@@ -15,6 +15,7 @@ const captureCount = ref(0)
 const xrSupported = ref(false)
 const xrActive = ref(false)
 const showInfoPopup = ref(false)
+const showPoints = ref(true)
 
 interface Marker {
   id: number
@@ -239,6 +240,14 @@ function cleanCloudManual() {
   statusMessage.value = removed > 0
     ? `${removed} points aberrants supprimés — ${pointCount.value} restants`
     : `Aucun point aberrant détecté`
+}
+
+function togglePoints() {
+  showPoints.value = !showPoints.value
+  const state = sceneState.value
+  if (state) {
+    state.pointMesh.visible = showPoints.value
+  }
 }
 
 // ──────────────── WebXR AR ────────────────
@@ -818,6 +827,9 @@ onBeforeUnmount(() => {
         <button class="btn warn" type="button" @click="clearMarkers" :disabled="markers.length === 0">
           Effacer Marqueurs
         </button>
+        <button class="btn toggle" type="button" @click="togglePoints">
+          {{ showPoints ? 'Masquer Points' : 'Afficher Points' }}
+        </button>
       </div>
 
 
@@ -985,6 +997,10 @@ p {
 
 .btn.warn {
   background: rgba(140, 60, 30, 0.85);
+}
+
+.btn.toggle {
+  background: rgba(80, 60, 130, 0.85);
 }
 
 .btn.ar-btn {
