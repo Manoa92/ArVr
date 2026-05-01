@@ -21,7 +21,7 @@ const canvasRef = ref<HTMLCanvasElement | null>(null)
 const overlayRootRef = ref<HTMLDivElement | null>(null)
 const arSupported = ref<boolean | null>(null) // null = checking
 const arError = ref('')
-const showPanel = ref(false)
+// const showPanel = ref(false)
 const isARActive = ref(false)
 const trackingQuality = ref<'excellent' | 'bon' | 'faible'>('bon')
 const trackingJitterMm = ref(0)
@@ -338,40 +338,40 @@ function addPointMesh(point: Point) {
 }
 
 // ─── Supprimer un point ───────────────────────────────────────────────────────
-function removePoint(pointId: string) {
-  pointsStore.removePoint(roomId.value, pointId)
-  const mesh = meshByPointId.get(pointId)
-  if (mesh && scene) {
-    scene.remove(mesh)
-    mesh.geometry.dispose()
-    ;(mesh.material as THREE.Material).dispose()
-  }
-  meshByPointId.delete(pointId)
+// function removePoint(pointId: string) {
+//   pointsStore.removePoint(roomId.value, pointId)
+//   const mesh = meshByPointId.get(pointId)
+//   if (mesh && scene) {
+//     scene.remove(mesh)
+//     mesh.geometry.dispose()
+//     ;(mesh.material as THREE.Material).dispose()
+//   }
+//   meshByPointId.delete(pointId)
 
-  const anchor = anchorByPointId.get(pointId)
-  if (anchor) {
-    anchor.delete()
-    anchorByPointId.delete(pointId)
-  }
-  lastRawPoseByPointId.delete(pointId)
-}
+//   const anchor = anchorByPointId.get(pointId)
+//   if (anchor) {
+//     anchor.delete()
+//     anchorByPointId.delete(pointId)
+//   }
+//   lastRawPoseByPointId.delete(pointId)
+// }
 
-function clearAll() {
-  for (const [id, mesh] of meshByPointId) {
-    if (scene) scene.remove(mesh)
-    mesh.geometry.dispose()
-    ;(mesh.material as THREE.Material).dispose()
-    meshByPointId.delete(id)
-  }
+// function clearAll() {
+//   for (const [id, mesh] of meshByPointId) {
+//     if (scene) scene.remove(mesh)
+//     mesh.geometry.dispose()
+//     ;(mesh.material as THREE.Material).dispose()
+//     meshByPointId.delete(id)
+//   }
 
-  for (const [id, anchor] of anchorByPointId) {
-    anchor.delete()
-    anchorByPointId.delete(id)
-  }
-  lastRawPoseByPointId.clear()
+//   for (const [id, anchor] of anchorByPointId) {
+//     anchor.delete()
+//     anchorByPointId.delete(id)
+//   }
+//   lastRawPoseByPointId.clear()
 
-  pointsStore.clearPoints(roomId.value)
-}
+//   pointsStore.clearPoints(roomId.value)
+// }
 
 // ─── Fin de session ───────────────────────────────────────────────────────────
 function onSessionEnd() {
