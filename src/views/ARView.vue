@@ -21,6 +21,7 @@ const canvasRef = ref<HTMLCanvasElement | null>(null)
 const arSupported = ref<boolean | null>(null) // null = checking
 const arError = ref('')
 const showPanel = ref(false)
+const isARActive = ref(false)
 
 // ─── Three.js internals ──────────────────────────────────────────────────────
 let renderer: THREE.WebGLRenderer | null = null
@@ -86,6 +87,7 @@ async function startARSession() {
   initThree()
   renderer!.xr.setReferenceSpaceType('local')
   await renderer!.xr.setSession(xrSession)
+  isARActive.value = true
   renderer!.setAnimationLoop(onXRFrame)
 }
 
@@ -239,6 +241,7 @@ async function exitAR() {
 }
 
 function cleanup() {
+  isARActive.value = false
   xrSession?.removeEventListener('select', onTap)
   canvasRef.value?.removeEventListener('pointerdown', onTap)
   renderer?.setAnimationLoop(null)
@@ -287,7 +290,7 @@ function cleanup() {
     </div>
 
     <!-- Écran de démarrage -->
-    <div v-else-if="!renderer" class="overlay centered start-box">
+    <div v-else-if="!isARActive" class="overlay centered start-box">
       <h2>{{ room?.name }}</h2>
       <p>Pointez la caméra vers une surface plane.</p>
       <button class="ar-start-btn" @click="startARSession">Lancer la RA</button>
