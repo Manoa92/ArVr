@@ -31,6 +31,7 @@ let xrSession: XRSession | null = null
 let hitTestSource: XRHitTestSource | null = null
 let hitTestSourceRequested = false
 let animationFrameId = 0
+let lastXRFrame: XRFrame | null = null
 
 // Reticle (curseur de placement)
 let reticle: THREE.Mesh | null = null
@@ -38,6 +39,7 @@ let reticleVisible = false
 
 // Dictionnaire pointId → mesh pour suppression propre
 const meshByPointId = new Map<string, THREE.Mesh>()
+const anchorByPointId = new Map<string, XRAnchor>()
 
 // ─── Check support WebXR ─────────────────────────────────────────────────────
 onMounted(async () => {
@@ -82,7 +84,7 @@ async function startARSession() {
   }
 
   xrSession.addEventListener('end', onSessionEnd)
-  xrSession.addEventListener('select', onTap)
+  xrSession.addEventListener('select', onXRSelect)
 
   initThree()
   renderer!.xr.setReferenceSpaceType('local')
@@ -134,6 +136,8 @@ function initThree() {
 function onXRFrame(_time: number, frame: XRFrame) {
   if (!xrSession || !renderer || !scene || !camera) return
 
+  lastXRFrame = frame
+
   const referenceSpace = renderer.xr.getReferenceSpace()
   if (!referenceSpace) return
 
@@ -170,11 +174,21 @@ function onXRFrame(_time: number, frame: XRFrame) {
     }
   }
 
+  updateAnchoredMeshes(frame, referenceSpace)
+
   renderer.render(scene, camera)
 }
 
 // ─── Tap pour placer un point ─────────────────────────────────────────────────
+function onXRSelect(event: XRInputSourceEvent) {
+  void placePoint(event.frame)
+}
+
 function onTap() {
+  void placePoint(lastXRFrame)
+}
+
+async function placePoint(frame: XRFrame | null) {
   if (!reticleVisible || !reticle || !scene) return
 
   // Lire la position depuis la matrice du reticle
@@ -189,6 +203,56 @@ function onTap() {
   })
 
   addPointMesh(point)
+
+  // Utilise une ancre si possible pour réduire le drift des points dans le monde réel.
+  if (frame) {
+    await attachAnchorToPoint(point.id, frame)
+  }
+}
+
+async function attachAnchorToPoint(pointId: string, frame: XRFrame) {
+  if (!hitTestSource) return
+
+  const hitTestResults = frame.getHitTestResults(hitTestSource)
+  if (hitTestResults.length === 0) return
+
+  const hit = hitTestResults[0] as XRHitTestResult & {
+    createAnchor?: () => Promise<XRAnchor>
+  }
+
+  if (!hit.createAnchor) return
+
+  try {
+    const anchor = await hit.createAnchor()
+    anchorByPointId.set(pointId, anchor)
+  } catch {
+    // Certains appareils exposent hit-test sans support effectif des anchors.
+  }
+}
+
+function updateAnchoredMeshes(frame: XRFrame, referenceSpace: XRReferenceSpace) {
+  if (anchorByPointId.size === 0) return
+
+  const tmpPosition = new THREE.Vector3()
+  const tmpQuaternion = new THREE.Quaternion()
+  const tmpScale = new THREE.Vector3()
+
+  for (const [pointId, anchor] of anchorByPointId) {
+    const mesh = meshByPointId.get(pointId)
+    if (!mesh) continue
+
+    const pose = frame.getPose(anchor.anchorSpace, referenceSpace)
+    if (!pose) {
+      mesh.visible = false
+      continue
+    }
+
+    mesh.visible = true
+    const matrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
+    matrix.decompose(tmpPosition, tmpQuaternion, tmpScale)
+    mesh.position.copy(tmpPosition)
+    mesh.quaternion.copy(tmpQuaternion)
+  }
 }
 
 // ─── Créer un mesh pour un point ─────────────────────────────────────────────
@@ -213,6 +277,12 @@ function removePoint(pointId: string) {
     ;(mesh.material as THREE.Material).dispose()
   }
   meshByPointId.delete(pointId)
+
+  const anchor = anchorByPointId.get(pointId)
+  if (anchor) {
+    anchor.delete()
+    anchorByPointId.delete(pointId)
+  }
 }
 
 function clearAll() {
@@ -222,6 +292,12 @@ function clearAll() {
     ;(mesh.material as THREE.Material).dispose()
     meshByPointId.delete(id)
   }
+
+  for (const [id, anchor] of anchorByPointId) {
+    anchor.delete()
+    anchorByPointId.delete(id)
+  }
+
   pointsStore.clearPoints(roomId.value)
 }
 
@@ -242,7 +318,7 @@ async function exitAR() {
 
 function cleanup() {
   isARActive.value = false
-  xrSession?.removeEventListener('select', onTap)
+  xrSession?.removeEventListener('select', onXRSelect)
   canvasRef.value?.removeEventListener('pointerdown', onTap)
   renderer?.setAnimationLoop(null)
 
@@ -257,6 +333,11 @@ function cleanup() {
   }
   meshByPointId.clear()
 
+  for (const anchor of anchorByPointId.values()) {
+    anchor.delete()
+  }
+  anchorByPointId.clear()
+
   if (reticle) {
     reticle.geometry.dispose()
     ;(reticle.material as THREE.Material).dispose()
@@ -269,6 +350,7 @@ function cleanup() {
   camera = null
   hitTestSource = null
   hitTestSourceRequested = false
+  lastXRFrame = null
   reticleVisible = false
   xrSession = null
 }
