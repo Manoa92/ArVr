@@ -81,6 +81,7 @@ async function startARSession() {
   }
 
   xrSession.addEventListener('end', onSessionEnd)
+  xrSession.addEventListener('select', onTap)
 
   initThree()
   renderer!.xr.setReferenceSpaceType('local')
@@ -123,8 +124,8 @@ function initThree() {
     addPointMesh(point)
   }
 
-  // Tap pour placer un point
-  canvasRef.value!.addEventListener('click', onTap)
+  // Fallback tactile pour les environnements non immersifs / debug navigateur.
+  canvasRef.value!.addEventListener('pointerdown', onTap)
 }
 
 // ─── Boucle XR ───────────────────────────────────────────────────────────────
@@ -238,7 +239,8 @@ async function exitAR() {
 }
 
 function cleanup() {
-  canvasRef.value?.removeEventListener('click', onTap)
+  xrSession?.removeEventListener('select', onTap)
+  canvasRef.value?.removeEventListener('pointerdown', onTap)
   renderer?.setAnimationLoop(null)
 
   if (animationFrameId) {
@@ -294,6 +296,8 @@ function cleanup() {
 
     <!-- HUD AR actif -->
     <template v-else>
+      <button class="hud-btn ar-back-btn" @click="exitAR">← Retour</button>
+
       <!-- Bouton quitter -->
       <button class="hud-btn exit-btn" @click="exitAR">✕ Quitter</button>
 
@@ -425,6 +429,13 @@ function cleanup() {
 .list-btn {
   top: 20px;
   left: 20px;
+  background: rgba(33, 33, 33, 0.85);
+  color: #fff;
+}
+
+.ar-back-btn {
+  left: 20px;
+  top: 70px;
   background: rgba(33, 33, 33, 0.85);
   color: #fff;
 }
