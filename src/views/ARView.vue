@@ -463,15 +463,15 @@ function cleanup() {
       <button class="hud-btn ar-back-btn" @click="exitAR">← Retour</button>
 
       <!-- Bouton quitter -->
-      <button class="hud-btn exit-btn" @click="exitAR">✕ Quitter</button>
+      <!-- <button class="hud-btn exit-btn" @click="exitAR">✕ Quitter</button> -->
 
       <!-- Bouton liste -->
-      <button class="hud-btn list-btn" @click="showPanel = !showPanel">
+      <!-- <button class="hud-btn list-btn" @click="showPanel = !showPanel">
         ☰ Points ({{ points.length }})
-      </button>
+      </button> -->
 
       <!-- Panneau liste -->
-      <transition name="slide">
+      <!-- <transition name="slide">
         <div class="points-panel" v-if="showPanel">
           <div class="panel-header">
             <span>Points placés</span>
@@ -491,7 +491,7 @@ function cleanup() {
             <li v-if="points.length === 0" class="empty">Tapez l'écran pour placer un point.</li>
           </ul>
         </div>
-      </transition>
+      </transition> -->
 
       <!-- Indicateur reticle -->
       <div class="reticle-hint" v-if="!reticleVisible">
