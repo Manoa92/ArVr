@@ -18,6 +18,7 @@ const points = computed(() => pointsStore.getPoints(roomId.value))
 
 // ─── State ───────────────────────────────────────────────────────────────────
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const overlayRootRef = ref<HTMLDivElement | null>(null)
 const arSupported = ref<boolean | null>(null) // null = checking
 const arError = ref('')
 const showPanel = ref(false)
@@ -84,10 +85,19 @@ async function startARSession() {
   if (!navigator.xr) return
 
   try {
-    xrSession = await navigator.xr.requestSession('immersive-ar', {
+    const sessionInit: XRSessionInit & {
+      domOverlay?: { root: Element }
+    } = {
       requiredFeatures: ['hit-test'],
-      optionalFeatures: ['anchors', 'dom-overlay'],
-    })
+      optionalFeatures: ['anchors'],
+    }
+
+    if (overlayRootRef.value) {
+      sessionInit.optionalFeatures?.push('dom-overlay')
+      sessionInit.domOverlay = { root: overlayRootRef.value }
+    }
+
+    xrSession = await navigator.xr.requestSession('immersive-ar', sessionInit)
   } catch (e) {
     arError.value = `Impossible de démarrer la session AR : ${(e as Error).message}`
     return
@@ -422,7 +432,7 @@ function cleanup() {
 </script>
 
 <template>
-  <div class="ar-page">
+  <div class="ar-page" ref="overlayRootRef">
     <!-- Canvas Three.js (plein écran) -->
     <canvas ref="canvasRef" class="ar-canvas" />
 
@@ -504,6 +514,7 @@ function cleanup() {
   inset: 0;
   width: 100%;
   height: 100%;
+  z-index: 0;
 }
 
 .overlay {
@@ -518,6 +529,8 @@ function cleanup() {
   background: rgba(0, 0, 0, 0.75);
   color: #fff;
   text-align: center;
+  z-index: 30;
+  pointer-events: auto;
 }
 
 .start-box h2 {
@@ -571,6 +584,8 @@ function cleanup() {
   cursor: pointer;
   z-index: 10;
   backdrop-filter: blur(4px);
+  pointer-events: auto;
+  touch-action: manipulation;
 }
 
 .exit-btn {
@@ -607,6 +622,7 @@ function cleanup() {
   background: rgba(20, 20, 20, 0.8);
   border: 1px solid rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(6px);
+  pointer-events: none;
 }
 
 .tracking-chip.quality-excellent {
@@ -634,6 +650,7 @@ function cleanup() {
   display: flex;
   flex-direction: column;
   padding-top: 70px;
+  pointer-events: auto;
 }
 
 .panel-header {
