@@ -382,10 +382,9 @@ function onSessionEnd() {
 async function exitAR() {
   if (xrSession) {
     await xrSession.end()
-  } else {
+  }
     cleanup()
     router.push(`/rooms/${roomId.value}`)
-  }
 }
 
 function cleanup() {
