@@ -22,6 +22,9 @@ const arSupported = ref<boolean | null>(null) // null = checking
 const arError = ref('')
 const showPanel = ref(false)
 const isARActive = ref(false)
+const trackingQuality = ref<'excellent' | 'bon' | 'faible'>('bon')
+const trackingJitterMm = ref(0)
+const trackingQualityClass = computed(() => `quality-${trackingQuality.value}`)
 
 // ─── Three.js internals ──────────────────────────────────────────────────────
 let renderer: THREE.WebGLRenderer | null = null
@@ -40,6 +43,13 @@ let reticleVisible = false
 // Dictionnaire pointId → mesh pour suppression propre
 const meshByPointId = new Map<string, THREE.Mesh>()
 const anchorByPointId = new Map<string, XRAnchor>()
+const lastRawPoseByPointId = new Map<
+  string,
+  { position: THREE.Vector3; quaternion: THREE.Quaternion }
+>()
+
+const POSITION_DEADBAND_METERS = 0.0025
+const ORIENTATION_DEADBAND_RADIANS = THREE.MathUtils.degToRad(0.7)
 
 // ─── Check support WebXR ─────────────────────────────────────────────────────
 onMounted(async () => {
@@ -231,11 +241,17 @@ async function attachAnchorToPoint(pointId: string, frame: XRFrame) {
 }
 
 function updateAnchoredMeshes(frame: XRFrame, referenceSpace: XRReferenceSpace) {
-  if (anchorByPointId.size === 0) return
+  if (anchorByPointId.size === 0) {
+    trackingQuality.value = 'faible'
+    trackingJitterMm.value = 0
+    return
+  }
 
   const tmpPosition = new THREE.Vector3()
   const tmpQuaternion = new THREE.Quaternion()
   const tmpScale = new THREE.Vector3()
+  let visibleAnchors = 0
+  let cumulatedDelta = 0
 
   for (const [pointId, anchor] of anchorByPointId) {
     const mesh = meshByPointId.get(pointId)
@@ -247,11 +263,55 @@ function updateAnchoredMeshes(frame: XRFrame, referenceSpace: XRReferenceSpace) 
       continue
     }
 
+    visibleAnchors += 1
     mesh.visible = true
     const matrix = new THREE.Matrix4().fromArray(pose.transform.matrix)
     matrix.decompose(tmpPosition, tmpQuaternion, tmpScale)
-    mesh.position.copy(tmpPosition)
-    mesh.quaternion.copy(tmpQuaternion)
+
+    const lastRaw = lastRawPoseByPointId.get(pointId)
+    if (!lastRaw) {
+      mesh.position.copy(tmpPosition)
+      mesh.quaternion.copy(tmpQuaternion)
+      lastRawPoseByPointId.set(pointId, {
+        position: tmpPosition.clone(),
+        quaternion: tmpQuaternion.clone(),
+      })
+      continue
+    }
+
+    const delta = tmpPosition.distanceTo(lastRaw.position)
+    const angularDelta = tmpQuaternion.angleTo(lastRaw.quaternion)
+    cumulatedDelta += delta
+
+    // Ignore les micro-variations qui génèrent un effet de tremblement visuel.
+    if (delta < POSITION_DEADBAND_METERS && angularDelta < ORIENTATION_DEADBAND_RADIANS) {
+      continue
+    }
+
+    const adaptiveAlpha = THREE.MathUtils.clamp(0.18 + delta * 10, 0.14, 0.62)
+    const adaptiveRotAlpha = THREE.MathUtils.clamp(adaptiveAlpha + 0.08, 0.2, 0.75)
+
+    mesh.position.lerp(tmpPosition, adaptiveAlpha)
+    mesh.quaternion.slerp(tmpQuaternion, adaptiveRotAlpha)
+
+    lastRaw.position.copy(tmpPosition)
+    lastRaw.quaternion.copy(tmpQuaternion)
+  }
+
+  if (visibleAnchors === 0) {
+    trackingQuality.value = 'faible'
+    trackingJitterMm.value = 0
+    return
+  }
+
+  const averageDelta = cumulatedDelta / visibleAnchors
+  trackingJitterMm.value = averageDelta * 1000
+  if (averageDelta < 0.004) {
+    trackingQuality.value = 'excellent'
+  } else if (averageDelta < 0.012) {
+    trackingQuality.value = 'bon'
+  } else {
+    trackingQuality.value = 'faible'
   }
 }
 
@@ -283,6 +343,7 @@ function removePoint(pointId: string) {
     anchor.delete()
     anchorByPointId.delete(pointId)
   }
+  lastRawPoseByPointId.delete(pointId)
 }
 
 function clearAll() {
@@ -297,6 +358,7 @@ function clearAll() {
     anchor.delete()
     anchorByPointId.delete(id)
   }
+  lastRawPoseByPointId.clear()
 
   pointsStore.clearPoints(roomId.value)
 }
@@ -337,6 +399,7 @@ function cleanup() {
     anchor.delete()
   }
   anchorByPointId.clear()
+  lastRawPoseByPointId.clear()
 
   if (reticle) {
     reticle.geometry.dispose()
@@ -352,6 +415,8 @@ function cleanup() {
   hitTestSourceRequested = false
   lastXRFrame = null
   reticleVisible = false
+  trackingQuality.value = 'bon'
+  trackingJitterMm.value = 0
   xrSession = null
 }
 </script>
@@ -381,6 +446,10 @@ function cleanup() {
 
     <!-- HUD AR actif -->
     <template v-else>
+      <div class="tracking-chip" :class="trackingQualityClass">
+        Suivi {{ trackingQuality }} · ~{{ trackingJitterMm.toFixed(1) }} mm
+      </div>
+
       <button class="hud-btn ar-back-btn" @click="exitAR">← Retour</button>
 
       <!-- Bouton quitter -->
@@ -523,6 +592,33 @@ function cleanup() {
   top: 70px;
   background: rgba(33, 33, 33, 0.85);
   color: #fff;
+}
+
+.tracking-chip {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  color: #fff;
+  background: rgba(20, 20, 20, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(6px);
+}
+
+.tracking-chip.quality-excellent {
+  background: rgba(27, 94, 32, 0.88);
+}
+
+.tracking-chip.quality-bon {
+  background: rgba(245, 124, 0, 0.88);
+}
+
+.tracking-chip.quality-faible {
+  background: rgba(183, 28, 28, 0.9);
 }
 
 /* Panneau latéral points */
