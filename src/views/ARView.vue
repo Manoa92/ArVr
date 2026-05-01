@@ -380,10 +380,10 @@ function onSessionEnd() {
 }
 
 async function exitAR() {
-  if (xrSession) {
-    await xrSession.end()
-  }
-    cleanup()
+  // if (xrSession) {
+  //   await xrSession.end()
+  // }
+    // cleanup()
     router.push(`/rooms/${roomId.value}`)
 }
 
